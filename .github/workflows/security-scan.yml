@@ -1,0 +1,89 @@
+name: Security Scanning
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly Monday 02:00 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: GPL-2.0, AGPL-3.0
+
+  snyk-scan:
+    name: Snyk Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --sarif-file-output=snyk.sarif
+      - name: Upload Snyk SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk.sarif
+
+  container-security:
+    name: Container Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+          severity: 'CRITICAL,HIGH'
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+
+  iac-compliance:
+    name: IaC Compliance Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Checkov full scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: all
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
+      - name: Upload Checkov results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov.sarif
+
+  secret-rotation-check:
+    name: Secret Age Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check secret ages
+        run: |
+          echo "Checking for secrets that may need rotation..."
+          # Custom script to verify secret ages via cloud APIs
+          echo "TODO: integrate with cloud secret manager APIs"

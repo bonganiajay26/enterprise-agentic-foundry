@@ -1,0 +1,38 @@
+# Trivy configuration for CI/CD and cluster scanning
+
+# Vulnerability scanning settings
+vulnerability:
+  type:
+    - os
+    - library
+  ignore-unfixed: false
+  severity:
+    - CRITICAL
+    - HIGH
+    - MEDIUM
+
+# Misconfiguration scanning (IaC, Kubernetes)
+misconfiguration:
+  include-non-failures: false
+
+# Secret detection
+secret:
+  config: trivy-secret.yaml
+
+# SBOM
+sbom:
+  format: spdx-json
+
+# Ignored vulnerabilities (document reason with expiry)
+# ignorefile: .trivyignore
+
+# Output
+format: table
+exit-code: 1
+
+# Cache
+cache:
+  dir: /tmp/trivy-cache
+
+# Timeout
+timeout: 10m0s

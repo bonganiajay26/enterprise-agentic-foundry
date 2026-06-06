@@ -1,0 +1,276 @@
+# Azure DevOps Universal CI Pipeline Template
+# Usage: extend this template from your azure-pipelines.yml
+
+parameters:
+  - name: environment
+    displayName: Target Environment
+    type: string
+    default: dev
+    values: [dev, staging, production]
+  - name: imageRepository
+    type: string
+    default: 'myapp'
+  - name: containerRegistry
+    type: string
+    default: 'myacr.azurecr.io'
+  - name: dockerfilePath
+    type: string
+    default: 'Dockerfile'
+  - name: runTests
+    type: boolean
+    default: true
+  - name: runSecurityScan
+    type: boolean
+    default: true
+
+variables:
+  imageName: '${{ parameters.containerRegistry }}/${{ parameters.imageRepository }}'
+  imageTag: '$(Build.BuildId)-$(Build.SourceVersion)'
+  DOCKER_BUILDKIT: 1
+
+stages:
+  # ─── Stage 1: Validate ─────────────────────────────────────────────
+  - stage: Validate
+    displayName: Validate & Scan
+    jobs:
+      - job: SecretsScan
+        displayName: Secrets Scan
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - script: |
+              docker run --rm -v $(Build.SourcesDirectory):/path \
+                zricethezav/gitleaks:latest detect \
+                --source /path --verbose --exit-code 1
+            displayName: 'Run Gitleaks'
+
+      - job: Lint
+        displayName: Lint & Format
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '20.x'
+            condition: eq(variables['hasNodeProject'], 'true')
+          - script: npm ci && npm run lint
+            displayName: 'ESLint'
+            condition: eq(variables['hasNodeProject'], 'true')
+          - script: |
+              pip install ruff
+              ruff check .
+            displayName: 'Ruff Python Lint'
+            condition: eq(variables['hasPythonProject'], 'true')
+          - task: HadolintV1@1
+            inputs:
+              displayName: 'Hadolint Dockerfile'
+
+  # ─── Stage 2: Test ─────────────────────────────────────────────────
+  - stage: Test
+    displayName: Test Suite
+    dependsOn: Validate
+    condition: and(succeeded(), eq('${{ parameters.runTests }}', 'true'))
+    jobs:
+      - job: UnitTests
+        displayName: Unit Tests
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '20.x'
+          - script: npm ci
+            displayName: 'Install dependencies'
+          - script: npm test -- --coverage --ci
+            displayName: 'Run tests'
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/junit.xml'
+          - task: PublishCodeCoverageResults@2
+            inputs:
+              summaryFileLocation: '**/coverage/cobertura-coverage.xml'
+
+      - job: SAST
+        displayName: SAST Scan
+        condition: eq('${{ parameters.runSecurityScan }}', 'true')
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: SonarQubePrepare@5
+            inputs:
+              SonarQube: 'SonarQubeServiceConnection'
+              scannerMode: 'CLI'
+              configMode: 'manual'
+              cliProjectKey: '$(Build.Repository.Name)'
+          - task: SonarQubeAnalyze@5
+          - task: SonarQubePublish@5
+            inputs:
+              pollingTimeoutSec: '300'
+
+  # ─── Stage 3: Build ────────────────────────────────────────────────
+  - stage: Build
+    displayName: Build & Push Image
+    dependsOn: Test
+    jobs:
+      - job: BuildImage
+        displayName: Build Docker Image
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: Docker@2
+            displayName: Build image
+            inputs:
+              command: build
+              dockerfile: ${{ parameters.dockerfilePath }}
+              buildContext: '.'
+              repository: $(imageName)
+              tags: |
+                $(imageTag)
+                latest
+
+          - script: |
+              docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                aquasec/trivy:latest image \
+                --severity CRITICAL,HIGH \
+                --exit-code 1 \
+                --no-progress \
+                $(imageName):$(imageTag)
+            displayName: 'Trivy Image Scan'
+
+          - script: |
+              curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+              syft $(imageName):$(imageTag) -o spdx-json > sbom.spdx.json
+            displayName: 'Generate SBOM'
+
+          - task: Docker@2
+            displayName: Push image to ACR
+            inputs:
+              command: push
+              repository: $(imageName)
+              containerRegistry: 'AzureContainerRegistryServiceConnection'
+              tags: |
+                $(imageTag)
+                latest
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: sbom.spdx.json
+              artifactName: sbom
+
+  # ─── Stage 4: IaC Validate ─────────────────────────────────────────
+  - stage: IaCValidate
+    displayName: IaC Validate
+    dependsOn: []
+    jobs:
+      - job: TerraformValidate
+        displayName: Terraform Validate & Plan
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: '1.6.6'
+          - task: TerraformTaskV4@4
+            displayName: Terraform Init
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: 'terraform/azure'
+              backendServiceArm: 'AzureRMServiceConnection'
+              backendAzureRmResourceGroupName: 'tfstate-rg'
+              backendAzureRmStorageAccountName: 'tfstatestorage'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: '$(System.TeamProject).tfstate'
+          - task: TerraformTaskV4@4
+            displayName: Terraform Validate
+            inputs:
+              provider: 'azurerm'
+              command: 'validate'
+              workingDirectory: 'terraform/azure'
+          - task: TerraformTaskV4@4
+            displayName: Terraform Plan
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: 'terraform/azure'
+              environmentServiceNameAzureRM: 'AzureRMServiceConnection'
+          - script: |
+              pip install checkov
+              checkov -d terraform/azure --framework terraform --output sarif > checkov.sarif || true
+            displayName: 'Checkov IaC Scan'
+
+  # ─── Stage 5: Deploy Dev ───────────────────────────────────────────
+  - stage: DeployDev
+    displayName: Deploy to Dev
+    dependsOn: [Build, IaCValidate]
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployDev
+        displayName: Deploy to AKS Dev
+        environment: 'dev'
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: HelmDeploy@0
+                  displayName: Helm Upgrade
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceConnection: 'AKS-Dev-ServiceConnection'
+                    namespace: 'default'
+                    command: 'upgrade'
+                    chartType: 'FilePath'
+                    chartPath: 'helm/base-service'
+                    releaseName: 'myapp-dev'
+                    overrideValues: 'image.tag=$(imageTag),environment=dev'
+                    waitForExecution: true
+
+  # ─── Stage 6: Deploy Production ────────────────────────────────────
+  - stage: DeployProduction
+    displayName: Deploy to Production
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployProd
+        displayName: Deploy to AKS Production
+        environment: 'production'
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          canary:
+            increments: [10, 50]
+            preDeploy:
+              steps:
+                - script: echo "Pre-deploy checks"
+            deploy:
+              steps:
+                - task: HelmDeploy@0
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceConnection: 'AKS-Prod-ServiceConnection'
+                    namespace: 'production'
+                    command: 'upgrade'
+                    chartPath: 'helm/base-service'
+                    releaseName: 'myapp-prod'
+                    overrideValues: 'image.tag=$(imageTag),environment=production'
+            postRouteTraffic:
+              steps:
+                - script: echo "Smoke tests"
+            on:
+              failure:
+                steps:
+                  - script: echo "Rollback triggered"
+              success:
+                steps:
+                  - script: echo "Deployment succeeded"

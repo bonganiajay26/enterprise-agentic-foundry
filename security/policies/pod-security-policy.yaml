@@ -1,0 +1,164 @@
+# Kyverno ClusterPolicy — Enforce Pod Security Standards (Restricted)
+# Apply this to all namespaces; exempt system namespaces via namespace labels.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-pod-security
+  annotations:
+    policies.kyverno.io/title: Restrict Pod Security
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Enforces the Kubernetes Pod Security Standards 'Restricted' profile.
+      Blocks privileged containers, host namespaces, unsafe volume types,
+      and requires non-root users with read-only root filesystem.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: no-privileged-containers
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - monitoring
+                - cert-manager
+      validate:
+        message: "Privileged containers are not allowed."
+        pattern:
+          spec:
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+
+    - name: no-host-namespaces
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Host namespaces (PID, IPC, Network) are not allowed."
+        pattern:
+          spec:
+            =(hostPID): "false"
+            =(hostIPC): "false"
+            =(hostNetwork): "false"
+
+    - name: require-non-root
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Containers must run as non-root user."
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: "true"
+
+    - name: require-read-only-root-fs
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Root filesystem must be read-only."
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  readOnlyRootFilesystem: "true"
+
+    - name: drop-all-capabilities
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "All Linux capabilities must be dropped."
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  capabilities:
+                    drop:
+                      - ALL
+
+    - name: disallow-privilege-escalation
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Privilege escalation is not allowed."
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  allowPrivilegeEscalation: "false"
+
+    - name: restrict-volume-types
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Only allowed volume types: configMap, emptyDir, projected, secret, downwardAPI, persistentVolumeClaim"
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.volumes[].hostPath | length(@) }}"
+                operator: GreaterThan
+                value: "0"
+
+    - name: require-seccomp
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Seccomp profile must be set to RuntimeDefault or Localhost."
+        pattern:
+          spec:
+            securityContext:
+              seccompProfile:
+                type: "RuntimeDefault | Localhost"
+---
+# Network Policy: default-deny-all
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Network Policy: allow-dns-egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

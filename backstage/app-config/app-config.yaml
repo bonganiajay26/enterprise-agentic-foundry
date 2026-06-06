@@ -1,0 +1,192 @@
+# Backstage IDP — Universal Platform Configuration
+
+app:
+  title: Universal DevOps Platform
+  baseUrl: https://backstage.your-domain.com
+
+organization:
+  name: Your Organization
+
+backend:
+  baseUrl: https://backstage.your-domain.com
+  listen:
+    port: 7007
+  csp:
+    connect-src: ["'self'", 'http:', 'https:']
+  cors:
+    origin: https://backstage.your-domain.com
+    methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+    credentials: true
+  database:
+    client: pg
+    connection:
+      host: ${POSTGRES_HOST}
+      port: 5432
+      user: ${POSTGRES_USER}
+      password: ${POSTGRES_PASSWORD}
+      database: backstage_plugin_catalog
+      ssl:
+        require: true
+        rejectUnauthorized: true
+  cache:
+    store: redis
+    connection: ${REDIS_HOST}
+
+# ─── Authentication ───────────────────────────────────────────────────
+auth:
+  environment: production
+  providers:
+    microsoft:
+      production:
+        clientId: ${MICROSOFT_CLIENT_ID}
+        clientSecret: ${MICROSOFT_CLIENT_SECRET}
+        tenantId: ${MICROSOFT_TENANT_ID}
+        domainHint: ${MICROSOFT_TENANT_ID}
+        additionalScopes:
+          - Mail.Send
+    github:
+      production:
+        clientId: ${GITHUB_CLIENT_ID}
+        clientSecret: ${GITHUB_CLIENT_SECRET}
+        enterpriseInstanceUrl: ${GITHUB_ENTERPRISE_URL}
+    google:
+      production:
+        clientId: ${GOOGLE_CLIENT_ID}
+        clientSecret: ${GOOGLE_CLIENT_SECRET}
+  session:
+    secret: ${BACKSTAGE_SESSION_SECRET}
+
+# ─── Service Catalog ──────────────────────────────────────────────────
+catalog:
+  import:
+    entityFilename: catalog-info.yaml
+    pullRequestBranchName: backstage-integration
+  rules:
+    - allow: [Component, System, API, Resource, Location, Domain, User, Group, Template]
+  providers:
+    github:
+      yourOrg:
+        organization: 'your-org'
+        catalogPath: '/catalog-info.yaml'
+        filters:
+          branch: 'main'
+          repository: '.*'
+        schedule:
+          frequency: { minutes: 30 }
+          timeout: { minutes: 3 }
+    microsoftGraphOrg:
+      default:
+        tenantId: ${MICROSOFT_TENANT_ID}
+        clientId: ${MICROSOFT_CLIENT_ID}
+        clientSecret: ${MICROSOFT_CLIENT_SECRET}
+        userFilter: accountEnabled eq true and userType eq 'Member'
+        groupFilter: securityEnabled eq true
+        schedule:
+          frequency: { hours: 1 }
+          timeout: { minutes: 50 }
+
+# ─── Integrations ─────────────────────────────────────────────────────
+integrations:
+  github:
+    - host: github.com
+      token: ${GITHUB_TOKEN}
+  azure:
+    - host: dev.azure.com
+      token: ${AZURE_DEVOPS_TOKEN}
+  gitlab:
+    - host: gitlab.com
+      token: ${GITLAB_TOKEN}
+
+# ─── TechDocs ─────────────────────────────────────────────────────────
+techdocs:
+  builder: external
+  generator:
+    runIn: docker
+    dockerImage: spotify/techdocs
+    pullImage: true
+  publisher:
+    type: azureBlobStorage
+    azureBlobStorage:
+      containerName: techdocs
+      credentials:
+        accountName: ${AZURE_STORAGE_ACCOUNT}
+        accountKey: ${AZURE_STORAGE_KEY}
+
+# ─── Kubernetes Plugin ────────────────────────────────────────────────
+kubernetes:
+  serviceLocatorMethod:
+    type: multiTenant
+  clusterLocatorMethods:
+    - type: config
+      clusters:
+        - name: azure-dev
+          url: ${AKS_DEV_URL}
+          authProvider: serviceAccount
+          serviceAccountToken: ${AKS_DEV_SA_TOKEN}
+          skipTLSVerify: false
+          caData: ${AKS_DEV_CA_DATA}
+        - name: azure-staging
+          url: ${AKS_STAGING_URL}
+          authProvider: serviceAccount
+          serviceAccountToken: ${AKS_STAGING_SA_TOKEN}
+          skipTLSVerify: false
+        - name: azure-production
+          url: ${AKS_PROD_URL}
+          authProvider: serviceAccount
+          serviceAccountToken: ${AKS_PROD_SA_TOKEN}
+          skipTLSVerify: false
+
+# ─── Proxy ────────────────────────────────────────────────────────────
+proxy:
+  '/grafana/api':
+    target: https://grafana.your-domain.com
+    headers:
+      Authorization: Bearer ${GRAFANA_TOKEN}
+  '/sonarqube':
+    target: https://sonarqube.your-domain.com/api
+    headers:
+      Authorization: Basic ${SONARQUBE_TOKEN}
+  '/argocd/api':
+    target: https://argocd.your-domain.com/api/v1/
+    headers:
+      Cookie: argocd.token=${ARGOCD_TOKEN}
+
+# ─── Scaffolder (Software Templates) ─────────────────────────────────
+scaffolder:
+  github:
+    token: ${GITHUB_TOKEN}
+    visibility: private
+  azure:
+    token: ${AZURE_DEVOPS_TOKEN}
+
+# ─── Grafana Plugin ───────────────────────────────────────────────────
+grafana:
+  domain: https://grafana.your-domain.com
+  unifiedAlerting: true
+
+# ─── SonarQube Plugin ─────────────────────────────────────────────────
+sonarqube:
+  baseUrl: https://sonarqube.your-domain.com
+  apiKey: ${SONARQUBE_TOKEN}
+
+# ─── Feature Flags ────────────────────────────────────────────────────
+featureFlags:
+  - name: scaffolder-backend-concurrency
+    description: Enable concurrent scaffolding
+
+# ─── Permissions ──────────────────────────────────────────────────────
+permission:
+  enabled: true
+  rbac:
+    admin:
+      users:
+        - name: user:default/admin
+      groups:
+        - name: group:default/platform-team
+    policies:
+      - entityRef: group:default/developers
+        policies:
+          - name: catalog.entity.read
+            effect: allow
+          - name: scaffolder.action.execute
+            effect: allow

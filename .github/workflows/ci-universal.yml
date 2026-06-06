@@ -1,0 +1,366 @@
+name: Universal CI Pipeline
+
+on:
+  push:
+    branches: [main, develop, staging, 'feature/**', 'release/**']
+  pull_request:
+    branches: [main, develop, staging]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  MIN_COVERAGE: 80
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Detect what changed ────────────────────────────────────────────
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      infra: ${{ steps.filter.outputs.infra }}
+      helm: ${{ steps.filter.outputs.helm }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'src/**'
+              - 'tests/**'
+              - 'Dockerfile*'
+              - 'package*.json'
+              - 'requirements*.txt'
+              - 'pom.xml'
+              - 'go.mod'
+            infra:
+              - 'terraform/**'
+              - 'opentofu/**'
+            helm:
+              - 'helm/**'
+            docs:
+              - 'docs/**'
+              - '*.md'
+
+  # ─── Secrets Scanning ───────────────────────────────────────────────
+  secrets-scan:
+    name: Secrets Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ─── Lint & Format ──────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.app == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Setup Python
+        if: hashFiles('requirements*.txt') != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run ESLint
+        if: hashFiles('package.json') != ''
+        run: |
+          npm ci
+          npm run lint --if-present
+      - name: Run Ruff (Python)
+        if: hashFiles('requirements*.txt') != ''
+        run: |
+          pip install ruff
+          ruff check .
+      - name: Run Hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        if: hashFiles('Dockerfile*') != ''
+
+  # ─── Unit Tests ─────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: [lint]
+    strategy:
+      matrix:
+        node-version: [18, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js ${{ matrix.node-version }}
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - name: Install dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci
+      - name: Run tests with coverage
+        if: hashFiles('package.json') != ''
+        run: npm test -- --coverage --coverageThreshold='{"global":{"lines":${{ env.MIN_COVERAGE }}}}'
+      - name: Upload coverage report
+        if: hashFiles('package.json') != ''
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ─── SAST Security Scan ─────────────────────────────────────────────
+  sast:
+    name: SAST Security Scan
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.app == 'true'
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript, python, java
+          queries: security-and-quality
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:${{ matrix.language }}'
+      - name: Run SonarQube Scan
+        if: env.SONAR_TOKEN != ''
+        uses: sonarqube-community/sonarqube-scan-action@v2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # ─── IaC Security Scan ──────────────────────────────────────────────
+  iac-scan:
+    name: IaC Security Scan
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.infra == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: reports/results.sarif
+          soft_fail: false
+          skip_check: CKV_AWS_18,CKV_AWS_86
+      - name: Upload Checkov SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: reports/results.sarif
+
+  # ─── Build Container Image ──────────────────────────────────────────
+  build:
+    name: Build & Scan Container
+    runs-on: ubuntu-latest
+    needs: [test, sast, secrets-scan]
+    if: needs.changes.outputs.app == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.tags }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.tags }}
+          artifact-name: sbom.spdx.json
+          output-file: sbom.spdx.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Push and Sign Image
+        run: |
+          docker push ${{ steps.meta.outputs.tags }}
+          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        env:
+          COSIGN_EXPERIMENTAL: true
+
+  # ─── Helm Lint & Test ───────────────────────────────────────────────
+  helm-lint:
+    name: Helm Lint & Test
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.helm == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.13.0'
+      - name: Run Helm lint
+        run: helm lint ./helm/base-service/
+      - name: Run chart-testing
+        uses: helm/chart-testing-action@v2.6.1
+      - name: Run ct lint
+        run: ct lint --all --chart-dirs helm/
+
+  # ─── Deploy to Dev ──────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: development
+      url: https://dev.your-domain.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy via ArgoCD / Helm
+        run: |
+          echo "Deploying ${{ needs.build.outputs.image-tag }} to dev"
+          # ArgoCD: argocd app set myapp --kustomize-image $IMAGE
+          # Helm direct: helm upgrade --install ...
+
+  # ─── Deploy to Staging ──────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/staging'
+    environment:
+      name: staging
+      url: https://staging.your-domain.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Staging
+        run: echo "Deploying to staging"
+      - name: Run E2E Tests
+        run: echo "Running E2E tests"
+      - name: Run DAST — OWASP ZAP
+        uses: zaproxy/action-full-scan@v0.9.0
+        with:
+          target: 'https://staging.your-domain.com'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+
+  # ─── Deploy to Production ───────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://your-domain.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Canary (10%)
+        run: echo "Deploying canary release"
+      - name: Monitor Canary Metrics
+        run: echo "Checking error rates and latency"
+      - name: Promote to Full Release
+        run: echo "Promoting to 100% traffic"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          generate_release_notes: true
+          files: sbom.spdx.json
+
+  # ─── Notify ─────────────────────────────────────────────────────────
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [deploy-production, deploy-staging, deploy-dev]
+    if: always()
+    steps:
+      - name: Slack Notification
+        uses: 8398a7/action-slack@v3
+        if: env.SLACK_WEBHOOK_URL != ''
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

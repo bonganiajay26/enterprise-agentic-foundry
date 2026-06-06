@@ -1,0 +1,246 @@
+# Universal base-service Helm values
+# Override these in environment-specific values files
+
+# ─── Application ──────────────────────────────────────────────────────
+app:
+  name: base-service
+  version: "1.0.0"
+  environment: production
+
+# ─── Image ────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/your-org/your-service
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# ─── Replicas & Scaling ───────────────────────────────────────────────
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+
+# ─── Resources ────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# ─── Service ──────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+
+# ─── Ingress ──────────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: your-service.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: your-service-tls
+      hosts:
+        - your-service.your-domain.com
+
+# ─── Health Checks ────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 10
+
+# ─── Environment Variables ────────────────────────────────────────────
+env: {}
+  # LOG_LEVEL: info
+  # NODE_ENV: production
+
+envFrom: []
+  # - secretRef:
+  #     name: my-secret
+  # - configMapRef:
+  #     name: my-config
+
+# ─── Secrets (External Secrets Operator) ─────────────────────────────
+externalSecrets:
+  enabled: false
+  refreshInterval: 1h
+  secretStore:
+    name: azure-key-vault
+    kind: ClusterSecretStore
+  secrets: []
+    # - secretKey: DATABASE_URL
+    #   remoteRef:
+    #     key: myapp-database-url
+
+# ─── ConfigMap ────────────────────────────────────────────────────────
+configMap:
+  enabled: false
+  data: {}
+
+# ─── Pod Disruption Budget ────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# ─── Topology Spread ──────────────────────────────────────────────────
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: base-service
+
+# ─── Security Context ─────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1001
+  capabilities:
+    drop:
+      - ALL
+
+# ─── Network Policy ───────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 5432
+
+# ─── Service Monitor (Prometheus) ─────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+  labels:
+    prometheus: kube-prometheus
+
+# ─── Volumes ──────────────────────────────────────────────────────────
+volumes: []
+volumeMounts: []
+
+# ─── Deployment Strategy ──────────────────────────────────────────────
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# ─── Affinity ─────────────────────────────────────────────────────────
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - base-service
+          topologyKey: kubernetes.io/hostname
+
+# ─── Service Account ──────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+# ─── Annotations & Labels ─────────────────────────────────────────────
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+podLabels: {}
+
+# ─── Canary Deployment (Argo Rollouts) ────────────────────────────────
+rollout:
+  enabled: false
+  strategy:
+    canary:
+      steps:
+        - setWeight: 10
+        - pause: {duration: 5m}
+        - setWeight: 50
+        - pause: {duration: 5m}
+        - setWeight: 100
+      analysis:
+        templates:
+          - templateName: success-rate
+        args:
+          - name: service-name
+            value: base-service

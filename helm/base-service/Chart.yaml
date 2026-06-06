@@ -1,0 +1,15 @@
+apiVersion: v2
+name: base-service
+description: Universal Helm chart for any microservice — supports canary, blue/green, HPA, PodDisruptionBudget, NetworkPolicy, ServiceMonitor
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - microservice
+  - platform
+  - universal
+maintainers:
+  - name: Platform Team
+    email: platform@your-org.com
+annotations:
+  category: Application

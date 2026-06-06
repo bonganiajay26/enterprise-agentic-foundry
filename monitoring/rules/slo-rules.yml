@@ -1,0 +1,132 @@
+# SLO Alert Rules — based on Google SRE error budget model
+
+groups:
+  - name: slo.availability
+    interval: 30s
+    rules:
+      # Availability SLO: 99.9% (allows 43.8min downtime/month)
+      - record: job:slo_availability:ratio_rate5m
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m])) by (job)
+          /
+          sum(rate(http_requests_total[5m])) by (job)
+
+      - alert: SLOAvailabilityBurn_Critical
+        expr: |
+          (
+            job:slo_availability:ratio_rate5m > (14.4 * 0.001)
+            and
+            job:slo_availability:ratio_rate5m > (14.4 * 0.001)
+          )
+        for: 2m
+        labels:
+          severity: critical
+          slo: availability
+        annotations:
+          summary: "Critical error budget burn rate for {{ $labels.job }}"
+          description: "Error budget burning at 14.4x rate. 2% budget consumed in 1h at current rate."
+          runbook_url: "https://runbooks.your-domain.com/slo-availability"
+
+      - alert: SLOAvailabilityBurn_Warning
+        expr: |
+          (
+            job:slo_availability:ratio_rate5m > (6 * 0.001)
+            and
+            job:slo_availability:ratio_rate5m > (6 * 0.001)
+          )
+        for: 15m
+        labels:
+          severity: warning
+          slo: availability
+        annotations:
+          summary: "Warning error budget burn rate for {{ $labels.job }}"
+          description: "Error budget burning at 6x rate. 5% budget consumed in 6h at current rate."
+
+  - name: slo.latency
+    interval: 30s
+    rules:
+      # Latency SLO: 95% requests < 200ms
+      - record: job:slo_latency_p95:ratio_rate5m
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{le="0.2"}[5m])) by (job)
+            /
+            sum(rate(http_request_duration_seconds_count[5m])) by (job)
+          )
+
+      - alert: SLOLatencyBurn_Critical
+        expr: job:slo_latency_p95:ratio_rate5m > (14.4 * 0.05)
+        for: 2m
+        labels:
+          severity: critical
+          slo: latency
+        annotations:
+          summary: "Critical latency SLO burn for {{ $labels.job }}"
+          description: "p95 latency SLO burning at 14.4x. Latency violations exceed 72% in window."
+
+  - name: platform.kubernetes
+    rules:
+      - alert: PodCrashLooping
+        expr: |
+          increase(kube_pod_container_status_restarts_total[15m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
+          description: "Container {{ $labels.container }} has restarted {{ $value }} times in 15 minutes"
+          runbook_url: "https://runbooks.your-domain.com/pod-crash-loop"
+
+      - alert: NodeNotReady
+        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.node }} is not ready"
+          runbook_url: "https://runbooks.your-domain.com/node-not-ready"
+
+      - alert: PersistentVolumeClaimPending
+        expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is pending"
+
+      - alert: HighCPUUsage
+        expr: |
+          (sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (namespace, pod, container)
+          /
+          sum(kube_pod_container_resource_limits{resource="cpu"}) by (namespace, pod, container)) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage in {{ $labels.namespace }}/{{ $labels.pod }}"
+
+      - alert: HighMemoryUsage
+        expr: |
+          (container_memory_working_set_bytes{container!=""}
+          /
+          kube_pod_container_resource_limits{resource="memory"}) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage in {{ $labels.namespace }}/{{ $labels.pod }}"
+
+  - name: platform.security
+    rules:
+      - alert: FalcoSecurityEvent
+        expr: falco_events_total{priority=~"Critical|Emergency"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Falco security event detected: {{ $labels.rule }}"
+
+      - alert: CertificateExpiringSoon
+        expr: (x509_cert_expiry - time()) / 86400 < 14
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate expiring in {{ $value | humanizeDuration }}"

@@ -1,0 +1,221 @@
+# Backstage Software Template — Microservice with Full Platform Integration
+# Creates: repository, CI/CD, Docker, Helm, Terraform, monitoring, and Backstage catalog entry
+
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: microservice-full-stack
+  title: Microservice — Full Stack
+  description: >
+    Scaffold a production-ready microservice with:
+    GitHub repository, CI/CD pipeline, Docker multi-stage build,
+    Helm chart, Terraform module, Prometheus monitoring,
+    OpenTelemetry instrumentation, Backstage catalog entry,
+    and documentation template.
+  tags:
+    - recommended
+    - nodejs
+    - python
+    - java
+    - go
+    - microservice
+    - kubernetes
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+spec:
+  owner: platform-team
+  type: service
+
+  parameters:
+    - title: Service Information
+      required: [serviceName, description, owner, system, language]
+      properties:
+        serviceName:
+          title: Service Name
+          type: string
+          description: Name of the microservice (kebab-case)
+          pattern: '^[a-z][a-z0-9-]*$'
+          ui:autofocus: true
+        description:
+          title: Description
+          type: string
+        owner:
+          title: Owner Team
+          type: string
+          ui:field: OwnerPicker
+          ui:options:
+            allowedKinds: [Group]
+        system:
+          title: System
+          type: string
+          ui:field: EntityPicker
+          ui:options:
+            allowedKinds: [System]
+        language:
+          title: Primary Language
+          type: string
+          enum: [nodejs, python, java, go, dotnet]
+          enumNames: [Node.js, Python, Java, Go, .NET]
+        lifecycle:
+          title: Lifecycle
+          type: string
+          default: experimental
+          enum: [experimental, production, deprecated]
+
+    - title: Infrastructure Configuration
+      required: [cloudProvider, environment]
+      properties:
+        cloudProvider:
+          title: Cloud Provider
+          type: string
+          enum: [azure, aws, gcp, multi-cloud]
+          enumNames: [Azure, AWS, GCP, Multi-Cloud]
+        environment:
+          title: Initial Environment
+          type: string
+          default: dev
+          enum: [dev, staging, production]
+        enableDatabase:
+          title: Include Database?
+          type: boolean
+          default: false
+        databaseType:
+          title: Database Type
+          type: string
+          enum: [postgresql, mysql, mongodb, redis]
+          ui:widget: select
+          ui:if: enableDatabase
+        enableCache:
+          title: Include Redis Cache?
+          type: boolean
+          default: false
+        enableMessageQueue:
+          title: Include Message Queue?
+          type: boolean
+          default: false
+
+    - title: CI/CD Configuration
+      properties:
+        ciProvider:
+          title: CI/CD Platform
+          type: string
+          default: github-actions
+          enum: [github-actions, azure-devops, gitlab-ci]
+          enumNames: [GitHub Actions, Azure DevOps, GitLab CI]
+        enableAutoDeployDev:
+          title: Auto-deploy to Dev on push?
+          type: boolean
+          default: true
+        enableCanaryProduction:
+          title: Canary deployment for Production?
+          type: boolean
+          default: true
+
+    - title: Repository Setup
+      required: [repoName, repoOwner]
+      properties:
+        repoOwner:
+          title: GitHub Organization
+          type: string
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts: [github.com]
+        repoName:
+          title: Repository Name
+          type: string
+          default: ${{ parameters.serviceName }}
+        repoVisibility:
+          title: Repository Visibility
+          type: string
+          default: private
+          enum: [public, private, internal]
+
+  steps:
+    - id: fetch-base
+      name: Fetch Base Template
+      action: fetch:template
+      input:
+        url: ./skeleton/${{ parameters.language }}
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          description: ${{ parameters.description }}
+          owner: ${{ parameters.owner }}
+          system: ${{ parameters.system }}
+          language: ${{ parameters.language }}
+          cloudProvider: ${{ parameters.cloudProvider }}
+          ciProvider: ${{ parameters.ciProvider }}
+
+    - id: fetch-ci
+      name: Add CI/CD Pipeline
+      action: fetch:template
+      input:
+        url: ./skeletons/ci/${{ parameters.ciProvider }}
+        targetPath: .
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          enableAutoDeployDev: ${{ parameters.enableAutoDeployDev }}
+          enableCanaryProduction: ${{ parameters.enableCanaryProduction }}
+
+    - id: fetch-helm
+      name: Add Helm Chart
+      action: fetch:template
+      input:
+        url: ./skeletons/helm
+        targetPath: helm/${{ parameters.serviceName }}
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          cloudProvider: ${{ parameters.cloudProvider }}
+
+    - id: fetch-terraform
+      name: Add Terraform Module
+      action: fetch:template
+      input:
+        url: ./skeletons/terraform/${{ parameters.cloudProvider }}
+        targetPath: terraform/${{ parameters.cloudProvider }}
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          enableDatabase: ${{ parameters.enableDatabase }}
+          databaseType: ${{ parameters.databaseType }}
+
+    - id: create-repo
+      name: Create GitHub Repository
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        description: ${{ parameters.description }}
+        repoUrl: github.com?owner=${{ parameters.repoOwner }}&repo=${{ parameters.repoName }}
+        repoVisibility: ${{ parameters.repoVisibility }}
+        defaultBranch: main
+        deleteBranchOnMerge: true
+        protectDefaultBranch: true
+        requireCodeOwnerReviews: true
+        requiredStatusCheckContexts:
+          - ci/secrets-scan
+          - ci/lint
+          - ci/test
+          - ci/sast
+          - ci/build
+
+    - id: register-catalog
+      name: Register in Backstage Catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['create-repo'].output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+    - id: create-sonarqube-project
+      name: Create SonarQube Project
+      action: sonarqube:create-project
+      input:
+        name: ${{ parameters.serviceName }}
+        key: ${{ parameters.repoOwner }}_${{ parameters.serviceName }}
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['create-repo'].output.remoteUrl }}
+      - title: Open in Catalog
+        icon: catalog
+        entityRef: ${{ steps['register-catalog'].output.entityRef }}
+      - title: CI/CD Pipeline
+        url: ${{ steps['create-repo'].output.remoteUrl }}/actions

@@ -1,0 +1,251 @@
+# Universal GitLab CI/CD Pipeline
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  IMAGE_NAME: $CI_REGISTRY_IMAGE
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  HELM_VERSION: "3.13.0"
+  TERRAFORM_VERSION: "1.6.6"
+
+stages:
+  - validate
+  - test
+  - build
+  - scan
+  - deploy-dev
+  - deploy-staging
+  - deploy-production
+
+# ─── Templates ───────────────────────────────────────────────────────
+.docker-login: &docker-login
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+.kube-deploy: &kube-deploy
+  image: alpine/helm:$HELM_VERSION
+  before_script:
+    - helm version
+
+# ─── Secrets Scan ────────────────────────────────────────────────────
+secrets-scan:
+  stage: validate
+  image: zricethezav/gitleaks:latest
+  script:
+    - gitleaks detect --source . --verbose
+  allow_failure: false
+
+# ─── Lint ────────────────────────────────────────────────────────────
+lint:
+  stage: validate
+  image: node:20-alpine
+  script:
+    - npm ci
+    - npm run lint
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  rules:
+    - exists:
+        - package.json
+
+lint-python:
+  stage: validate
+  image: python:3.11-slim
+  script:
+    - pip install ruff
+    - ruff check .
+  rules:
+    - exists:
+        - requirements*.txt
+
+lint-dockerfile:
+  stage: validate
+  image: hadolint/hadolint:latest-alpine
+  script:
+    - hadolint Dockerfile
+  rules:
+    - exists:
+        - Dockerfile
+
+# ─── IaC Validate ────────────────────────────────────────────────────
+terraform-validate:
+  stage: validate
+  image:
+    name: hashicorp/terraform:$TERRAFORM_VERSION
+    entrypoint: [""]
+  script:
+    - cd terraform/
+    - terraform init -backend=false
+    - terraform validate
+  rules:
+    - changes:
+        - terraform/**/*
+
+checkov-scan:
+  stage: validate
+  image:
+    name: bridgecrew/checkov:latest
+    entrypoint: [""]
+  script:
+    - checkov -d terraform/ --framework terraform --output cli --output sarif --output-file-path console,gl-sast-report.json
+  artifacts:
+    reports:
+      sast: gl-sast-report.json
+  allow_failure: true
+  rules:
+    - changes:
+        - terraform/**/*
+
+# ─── Unit Tests ──────────────────────────────────────────────────────
+test:unit:
+  stage: test
+  image: node:20-alpine
+  script:
+    - npm ci
+    - npm test -- --coverage --reporters=default --reporters=jest-junit
+  coverage: '/Lines\s*:\s*(\d+\.?\d*)/'
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+
+# ─── SAST ─────────────────────────────────────────────────────────────
+sast:
+  stage: test
+  include:
+    - template: Security/SAST.gitlab-ci.yml
+  variables:
+    SAST_EXCLUDED_ANALYZERS: "eslint"
+
+dependency_scanning:
+  stage: test
+  include:
+    - template: Security/Dependency-Scanning.gitlab-ci.yml
+
+# ─── Build ───────────────────────────────────────────────────────────
+build:image:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  <<: *docker-login
+  script:
+    - |
+      docker build \
+        --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+        --build-arg VCS_REF=$CI_COMMIT_SHA \
+        --build-arg VERSION=$CI_COMMIT_TAG \
+        --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+        --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
+        -t $IMAGE_NAME:$IMAGE_TAG \
+        -t $IMAGE_NAME:latest \
+        .
+    - docker push $IMAGE_NAME:$IMAGE_TAG
+    - docker push $IMAGE_NAME:latest
+  artifacts:
+    reports:
+      dotenv: build.env
+
+# ─── Container Scan ──────────────────────────────────────────────────
+container_scanning:
+  stage: scan
+  include:
+    - template: Security/Container-Scanning.gitlab-ci.yml
+  variables:
+    CS_IMAGE: $IMAGE_NAME:$IMAGE_TAG
+    CS_SEVERITY_THRESHOLD: HIGH
+
+trivy-scan:
+  stage: scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image --exit-code 1 --severity CRITICAL,HIGH --no-progress $IMAGE_NAME:$IMAGE_TAG
+    - trivy image --format sarif --output trivy.sarif $IMAGE_NAME:$IMAGE_TAG
+  artifacts:
+    reports:
+      sast: trivy.sarif
+  allow_failure: false
+
+sbom-generate:
+  stage: scan
+  image:
+    name: anchore/syft:latest
+    entrypoint: [""]
+  script:
+    - syft $IMAGE_NAME:$IMAGE_TAG -o spdx-json > sbom.spdx.json
+  artifacts:
+    paths:
+      - sbom.spdx.json
+
+# ─── Deploy Dev ──────────────────────────────────────────────────────
+deploy:dev:
+  stage: deploy-dev
+  <<: *kube-deploy
+  script:
+    - helm upgrade --install myapp-dev ./helm/base-service
+      --namespace dev --create-namespace
+      --set image.tag=$IMAGE_TAG
+      --set environment=dev
+      --wait --timeout 5m
+  environment:
+    name: development
+    url: https://dev.your-domain.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+# ─── Deploy Staging ──────────────────────────────────────────────────
+deploy:staging:
+  stage: deploy-staging
+  <<: *kube-deploy
+  script:
+    - helm upgrade --install myapp-staging ./helm/base-service
+      --namespace staging --create-namespace
+      --set image.tag=$IMAGE_TAG
+      --set environment=staging
+      --wait --timeout 5m
+  environment:
+    name: staging
+    url: https://staging.your-domain.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+dast:
+  stage: deploy-staging
+  include:
+    - template: Security/DAST.gitlab-ci.yml
+  variables:
+    DAST_WEBSITE: https://staging.your-domain.com
+    DAST_BROWSER_SCAN: "true"
+  needs: [deploy:staging]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+# ─── Deploy Production ───────────────────────────────────────────────
+deploy:production:
+  stage: deploy-production
+  <<: *kube-deploy
+  script:
+    - helm upgrade --install myapp-prod ./helm/base-service
+      --namespace production --create-namespace
+      --set image.tag=$IMAGE_TAG
+      --set environment=production
+      --set replicaCount=3
+      --wait --timeout 10m
+  environment:
+    name: production
+    url: https://your-domain.com
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

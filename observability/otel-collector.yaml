@@ -1,0 +1,257 @@
+# OpenTelemetry Collector — Universal Platform Configuration
+# Receives traces, metrics, and logs; exports to Grafana stack and cloud-native backends
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "https://*.your-domain.com"
+
+  # Kubernetes infrastructure metrics
+  kubeletstats:
+    collection_interval: 20s
+    auth_type: serviceAccount
+    endpoint: "${K8S_NODE_NAME}:10250"
+    insecure_skip_verify: true
+    metric_groups:
+      - node
+      - pod
+      - container
+      - volume
+
+  # Kubernetes events
+  k8s_events:
+    auth_type: serviceAccount
+    namespaces: []
+
+  # Host metrics
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu: {}
+      disk: {}
+      load: {}
+      filesystem: {}
+      memory: {}
+      network: {}
+      paging: {}
+      processes: {}
+
+  # Prometheus scraping (for services not using OTLP)
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          static_configs:
+            - targets: ['localhost:8888']
+
+  # Log files
+  filelog:
+    include:
+      - /var/log/pods/*/*/*.log
+    start_at: beginning
+    include_file_path: true
+    include_file_name: false
+    operators:
+      - type: router
+        id: get-format
+        routes:
+          - output: parser-docker
+            expr: 'body matches "^\\{"'
+          - output: parser-crio
+            expr: 'body matches "^[^ Z]+ "'
+      - type: json_parser
+        id: parser-docker
+        output: extract-metadata-from-filepath
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+      - type: regex_parser
+        id: parser-crio
+        regex: '^(?P<time>[^ Z]+) (?P<stream>stdout|stderr) (?P<logtag>[^ ]*) ?(?P<log>.*)$'
+        output: extract-metadata-from-filepath
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: '2006-01-02T15:04:05.000000000-07:00'
+      - type: regex_parser
+        id: extract-metadata-from-filepath
+        regex: '^.*\/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<uid>[a-f0-9\-]+)\/(?P<container_name>[^\._]+)\/(?P<restart_count>\d+)\.log$'
+        parse_from: attributes["log.file.path"]
+        cache:
+          size: 128
+      - type: move
+        from: attributes["log.file.path"]
+        to: resource["log.file.path"]
+      - type: move
+        from: attributes.container_name
+        to: resource["k8s.container.name"]
+      - type: move
+        from: attributes.namespace
+        to: resource["k8s.namespace.name"]
+      - type: move
+        from: attributes.pod_name
+        to: resource["k8s.pod.name"]
+      - type: move
+        from: attributes.restart_count
+        to: resource["k8s.container.restart_count"]
+      - type: move
+        from: attributes.uid
+        to: resource["k8s.pod.uid"]
+
+processors:
+  # Batch for performance
+  batch:
+    timeout: 10s
+    send_batch_size: 10000
+    send_batch_max_size: 11000
+
+  # Memory limiter
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 80
+    spike_limit_percentage: 30
+
+  # Resource detection (cloud metadata)
+  resourcedetection:
+    detectors:
+      - env
+      - k8snode
+      - azure
+      - aws
+      - gcp
+    timeout: 30s
+    override: false
+
+  # K8s attributes enrichment
+  k8sattributes:
+    auth_type: serviceAccount
+    passthrough: false
+    filter:
+      node_from_env_var: KUBE_NODE_NAME
+    extract:
+      metadata:
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.deployment.name
+        - k8s.statefulset.name
+        - k8s.daemonset.name
+        - k8s.cronjob.name
+        - k8s.job.name
+        - k8s.namespace.name
+        - k8s.node.name
+        - k8s.pod.start_time
+      labels:
+        - tag_name: app.label.component
+          key: app.kubernetes.io/component
+          from: pod
+      annotations:
+        - tag_name: ad.config
+          key: ad.datadoghq.com/java-env.config
+          from: pod
+
+  # Span filtering — drop noisy health check spans
+  filter/spans:
+    spans:
+      exclude:
+        match_type: regexp
+        attributes:
+          - key: http.url
+            value: '.*(health|metrics|ready|live).*'
+
+  # Tail sampling
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100
+    expected_new_traces_per_sec: 10
+    policies:
+      - name: error-policy
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+      - name: slow-traces-policy
+        type: latency
+        latency:
+          threshold_ms: 1000
+      - name: probabilistic-policy
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+  # Attribute processing
+  attributes/logs:
+    actions:
+      - key: log.level
+        from_attribute: severity
+        action: insert
+
+exporters:
+  # Prometheus (for metrics)
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: otel
+    send_timestamps: true
+    metric_expiration: 180m
+    enable_open_metrics: true
+
+  # Loki (for logs)
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+      job: true
+    labels:
+      resource:
+        service.name: "service_name"
+        k8s.namespace.name: "namespace"
+        k8s.pod.name: "pod"
+        k8s.container.name: "container"
+
+  # Tempo (for traces)
+  otlp/tempo:
+    endpoint: http://tempo:4317
+    tls:
+      insecure: true
+
+  # Cloud-native exporters (configure based on target cloud)
+  # Azure Monitor
+  azuremonitor:
+    connection_string: "${APPLICATIONINSIGHTS_CONNECTION_STRING}"
+
+  # Logging (for debugging)
+  logging:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, resourcedetection, filter/spans, tail_sampling, batch]
+      exporters: [otlp/tempo, logging]
+
+    metrics:
+      receivers: [otlp, kubeletstats, hostmetrics, prometheus]
+      processors: [memory_limiter, k8sattributes, resourcedetection, batch]
+      exporters: [prometheus, logging]
+
+    logs:
+      receivers: [otlp, filelog, k8s_events]
+      processors: [memory_limiter, k8sattributes, resourcedetection, attributes/logs, batch]
+      exporters: [loki, logging]
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
