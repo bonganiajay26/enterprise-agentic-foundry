@@ -1,0 +1,252 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Universal EKS Platform — VPC, EKS Cluster, ECR, KMS, IAM
+  Equivalent to terraform/aws/main.tf using CloudFormation
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: platform
+    Description: Naming prefix for all resources
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, production]
+    Description: Deployment environment
+
+  KubernetesVersion:
+    Type: String
+    Default: '1.28'
+
+  SystemNodeInstanceType:
+    Type: String
+    Default: t3.medium
+
+  WorkloadNodeInstanceType:
+    Type: String
+    Default: m5.large
+
+  WorkloadNodeMinSize:
+    Type: Number
+    Default: 2
+
+  WorkloadNodeMaxSize:
+    Type: Number
+    Default: 20
+
+  WorkloadNodeDesiredSize:
+    Type: Number
+    Default: 3
+
+  VpcCidr:
+    Type: String
+    Default: '10.0.0.0/16'
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, production]
+
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: '10.0.0.0/16'
+    Private1:
+      CIDR: '10.0.1.0/24'
+    Private2:
+      CIDR: '10.0.2.0/24'
+    Private3:
+      CIDR: '10.0.3.0/24'
+    Public1:
+      CIDR: '10.0.101.0/24'
+    Public2:
+      CIDR: '10.0.102.0/24'
+    Public3:
+      CIDR: '10.0.103.0/24'
+
+Resources:
+
+  # ─── VPC ─────────────────────────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-${Environment}-vpc'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: !Sub 'kubernetes.io/cluster/${Prefix}-${Environment}-eks'
+          Value: shared
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-${Environment}-igw'
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Private1, CIDR]
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-${Environment}-private-1'
+        - Key: !Sub 'kubernetes.io/cluster/${Prefix}-${Environment}-eks'
+          Value: owned
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Private2, CIDR]
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-${Environment}-private-2'
+        - Key: !Sub 'kubernetes.io/cluster/${Prefix}-${Environment}-eks'
+          Value: owned
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Private3, CIDR]
+      Tags:
+        - Key: Name
+          Value: !Sub '${Prefix}-${Environment}-private-3'
+        - Key: !Sub 'kubernetes.io/cluster/${Prefix}-${Environment}-eks'
+          Value: owned
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  # ─── KMS Key ─────────────────────────────────────────────────────────
+  EKSEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: EKS secrets encryption key
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  # ─── ECR Repository ──────────────────────────────────────────────────
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${Prefix}-${Environment}'
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !GetAtt EKSEncryptionKey.Arn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep last 30 images",
+              "selection": {
+                "tagStatus": "any",
+                "countType": "imageCountMoreThan",
+                "countNumber": 30
+              },
+              "action": {"type": "expire"}
+            }]
+          }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ─── EKS Cluster Role ────────────────────────────────────────────────
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Prefix}-${Environment}-eks-cluster-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  # ─── EKS Cluster ─────────────────────────────────────────────────────
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub '${Prefix}-${Environment}-eks'
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          - !Ref PrivateSubnet3
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+      EncryptionConfig:
+        - Provider:
+            KeyArn: !GetAtt EKSEncryptionKey.Arn
+          Resources: [secrets]
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  ClusterName:
+    Description: EKS cluster name
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterName'
+
+  ClusterArn:
+    Description: EKS cluster ARN
+    Value: !GetAtt EKSCluster.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterArn'
+
+  ECRRepositoryUri:
+    Description: ECR repository URI
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRUri'
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'

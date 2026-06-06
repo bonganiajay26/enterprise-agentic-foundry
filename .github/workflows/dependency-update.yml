@@ -1,0 +1,76 @@
+name: Dependency Updates
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Monday 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  renovate:
+    name: Renovate Dependency Updates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Renovate
+        uses: renovatebot/github-action@v40
+        with:
+          token: ${{ secrets.RENOVATE_TOKEN || secrets.GITHUB_TOKEN }}
+        env:
+          LOG_LEVEL: debug
+
+  npm-audit:
+    name: npm Security Audit
+    runs-on: ubuntu-latest
+    if: hashFiles('package.json') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - name: Audit dependencies
+        run: |
+          npm audit --audit-level=high --json > npm-audit.json || true
+          if [ -s npm-audit.json ]; then
+            echo "## npm Audit Results" >> $GITHUB_STEP_SUMMARY
+            cat npm-audit.json | jq -r '.vulnerabilities | to_entries[] | "- **\(.key)**: \(.value.severity) (\(.value.via[0].url // "no-url"))"' >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  python-safety:
+    name: Python Safety Check
+    runs-on: ubuntu-latest
+    if: hashFiles('requirements*.txt') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install safety
+      - name: Check dependencies
+        run: safety check -r requirements.txt --json > safety-report.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: safety-report
+          path: safety-report.json
+
+  terraform-updates:
+    name: Terraform Provider Updates
+    runs-on: ubuntu-latest
+    if: hashFiles('terraform/**/*.tf') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.6.6'
+      - name: Check for provider updates
+        run: |
+          cd terraform/azure
+          terraform init -upgrade 2>&1 | tee /tmp/tf-upgrade.txt
+          if grep -q "Upgrading" /tmp/tf-upgrade.txt; then
+            echo "Provider upgrades available" >> $GITHUB_STEP_SUMMARY
+            cat /tmp/tf-upgrade.txt | grep "Upgrading" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -1,0 +1,34 @@
+# Staging environment overrides
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+    nginx.ingress.kubernetes.io/rate-limit: "50"
+  hosts:
+    - host: myservice-staging.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+env:
+  LOG_LEVEL: info
+  NODE_ENV: staging
+
+app:
+  environment: staging

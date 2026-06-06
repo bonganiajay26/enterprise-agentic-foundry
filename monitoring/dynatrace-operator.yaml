@@ -1,0 +1,73 @@
+# Dynatrace Operator — Full-Stack Kubernetes Observability
+# Install operator first: kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/latest/download/kubernetes.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dynatrace
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dynakube-secret
+  namespace: dynatrace
+type: Opaque
+stringData:
+  apiToken: "${DT_API_TOKEN}"
+  dataIngestToken: "${DT_DATA_INGEST_TOKEN}"
+---
+apiVersion: dynatrace.com/v1beta1
+kind: DynaKube
+metadata:
+  name: dynakube
+  namespace: dynatrace
+  annotations:
+    feature.dynatrace.com/automatic-kubernetes-api-monitoring: "true"
+spec:
+  apiUrl: "https://${DT_ENVIRONMENT_ID}.live.dynatrace.com/api"
+  tokens: dynakube-secret
+  metadataEnrichment:
+    enabled: true
+    namespaces:
+      matchLabels:
+        dynatrace-enrichment: enabled
+
+  # OneAgent — full-stack monitoring
+  oneAgent:
+    cloudNativeFullStack:
+      image: ""
+      tolerations:
+        - operator: Exists
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "512Mi"
+        limits:
+          cpu: "300m"
+          memory: "1.5Gi"
+      env:
+        - name: ONEAGENT_ENABLE_VOLUME_STORAGE
+          value: "true"
+
+  # ActiveGate — cluster communication
+  activeGate:
+    capabilities:
+      - routing
+      - kubernetes-monitoring
+      - dynatrace-api
+    replicas: 2
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1.5Gi"
+
+  # Kubernetes monitoring
+  kubernetesMonitoring:
+    enabled: true
+
+  # Log monitoring
+  logMonitoring:
+    enabled: true

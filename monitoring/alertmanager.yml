@@ -1,0 +1,153 @@
+# Alertmanager Configuration — Universal Platform
+
+global:
+  smtp_smarthost: 'smtp.sendgrid.net:587'
+  smtp_from: 'alerts@your-domain.com'
+  smtp_auth_username: 'apikey'
+  smtp_auth_password: '${SENDGRID_API_KEY}'
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+  resolve_timeout: 5m
+
+# ─── Templates ────────────────────────────────────────────────────────
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# ─── Routing ──────────────────────────────────────────────────────────
+route:
+  group_by: ['alertname', 'cluster', 'service', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'default-slack'
+
+  routes:
+    # Critical alerts — page immediately
+    - match:
+        severity: critical
+      receiver: pagerduty-critical
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true
+
+    # Critical alerts also go to Slack
+    - match:
+        severity: critical
+      receiver: slack-critical
+      continue: false
+
+    # Warning alerts — Slack only
+    - match:
+        severity: warning
+      receiver: slack-warning
+      group_wait: 1m
+      repeat_interval: 4h
+
+    # SLO burn rate alerts
+    - match:
+        slo: availability
+      receiver: slo-slack
+      group_wait: 10s
+      repeat_interval: 30m
+
+    # Security alerts
+    - match_re:
+        alertname: '^(Falco|SecurityAlert|CertificateExpiring).*'
+      receiver: security-slack
+      group_wait: 10s
+      repeat_interval: 2h
+
+    # Infrastructure alerts
+    - match_re:
+        alertname: '^(Node|Kube|PVC|OOM).*'
+      receiver: infra-slack
+      group_wait: 2m
+      repeat_interval: 6h
+
+# ─── Receivers ────────────────────────────────────────────────────────
+receivers:
+  - name: 'default-slack'
+    slack_configs:
+      - channel: '#platform-alerts'
+        title: '{{ template "slack.title" . }}'
+        text: '{{ template "slack.text" . }}'
+        color: '{{ template "slack.color" . }}'
+        send_resolved: true
+
+  - name: 'slack-critical'
+    slack_configs:
+      - channel: '#incidents'
+        username: 'AlertManager'
+        icon_emoji: ':red_circle:'
+        title: ':red_circle: CRITICAL: {{ .GroupLabels.alertname }}'
+        text: |
+          *Cluster:* {{ .GroupLabels.cluster }}
+          *Namespace:* {{ .GroupLabels.namespace }}
+          *Summary:* {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}
+          *Runbook:* {{ range .Alerts }}{{ .Annotations.runbook_url }}{{ end }}
+        send_resolved: true
+
+  - name: 'slack-warning'
+    slack_configs:
+      - channel: '#platform-alerts'
+        icon_emoji: ':warning:'
+        title: ':warning: WARNING: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}*Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}{{ end }}
+        send_resolved: true
+
+  - name: 'slo-slack'
+    slack_configs:
+      - channel: '#slo-alerts'
+        icon_emoji: ':chart_with_downwards_trend:'
+        title: ':chart_with_downwards_trend: SLO Burn Rate Alert: {{ .GroupLabels.job }}'
+        text: |
+          {{ range .Alerts }}
+          *SLO:* {{ .Labels.slo }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Dashboard:* https://grafana.your-domain.com/d/slo-dashboard
+          {{ end }}
+        send_resolved: true
+
+  - name: 'security-slack'
+    slack_configs:
+      - channel: '#security-alerts'
+        icon_emoji: ':lock:'
+        title: ':lock: Security Alert: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}: {{ .Annotations.description }}{{ end }}'
+        send_resolved: true
+
+  - name: 'infra-slack'
+    slack_configs:
+      - channel: '#infra-alerts'
+        title: ':wrench: Infrastructure: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        send_resolved: true
+
+  - name: 'pagerduty-critical'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        description: '{{ template "pagerduty.description" . }}'
+        severity: '{{ if eq .GroupLabels.severity "critical" }}critical{{ else }}warning{{ end }}'
+        details:
+          firing: '{{ template "pagerduty.firing" . }}'
+          num_firing: '{{ .Alerts.Firing | len }}'
+          cluster: '{{ .GroupLabels.cluster }}'
+          namespace: '{{ .GroupLabels.namespace }}'
+
+# ─── Inhibition Rules ─────────────────────────────────────────────────
+inhibit_rules:
+  # If a critical alert fires, suppress warning for same service
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster', 'service', 'namespace']
+
+  # If cluster is down, suppress all node alerts
+  - source_match:
+      alertname: 'ClusterDown'
+    target_match_re:
+      alertname: '^Node.*'
+    equal: ['cluster']

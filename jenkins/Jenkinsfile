@@ -1,0 +1,314 @@
+// Universal Jenkins Pipeline
+// Supports: Node.js, Python, Java, .NET, Go
+// Stages: Validate → Test → SAST → Build → Scan → Deploy
+
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-agent
+spec:
+  serviceAccountName: jenkins
+  containers:
+    - name: jnlp
+      image: jenkins/inbound-agent:latest
+    - name: build
+      image: node:20-alpine
+      command: [cat]
+      tty: true
+      resources:
+        requests: { cpu: "500m", memory: "512Mi" }
+        limits:   { cpu: "2000m", memory: "2Gi" }
+    - name: docker
+      image: docker:24-dind
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+    - name: tools
+      image: alpine/helm:3.13.0
+      command: [cat]
+      tty: true
+    - name: trivy
+      image: aquasec/trivy:latest
+      command: [cat]
+      tty: true
+    - name: terraform
+      image: hashicorp/terraform:1.6
+      command: [cat]
+      tty: true
+  volumes:
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock
+'''
+        }
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        disableConcurrentBuilds(abortPrevious: true)
+        timestamps()
+        timeout(time: 60, unit: 'MINUTES')
+        ansiColor('xterm')
+    }
+
+    environment {
+        REGISTRY          = 'your-registry.azurecr.io'
+        IMAGE_NAME        = "${REGISTRY}/${JOB_BASE_NAME}"
+        IMAGE_TAG         = "${GIT_COMMIT[0..7]}-${BUILD_NUMBER}"
+        SONAR_URL         = credentials('sonar-url')
+        SONAR_TOKEN       = credentials('sonar-token')
+        REGISTRY_CREDS    = credentials('registry-credentials')
+        SLACK_WEBHOOK     = credentials('slack-webhook')
+        KUBECONFIG_DEV    = credentials('kubeconfig-dev')
+        KUBECONFIG_PROD   = credentials('kubeconfig-prod')
+    }
+
+    stages {
+
+        // ─── Stage 1: Secrets Scan ────────────────────────────────────
+        stage('Secrets Scan') {
+            steps {
+                container('tools') {
+                    sh '''
+                        apk add --no-cache git
+                        wget -qO /usr/local/bin/gitleaks \
+                          https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_linux_amd64
+                        chmod +x /usr/local/bin/gitleaks
+                        gitleaks detect --source . --verbose --exit-code 1
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 2: Lint & Validate ─────────────────────────────────
+        stage('Lint') {
+            parallel {
+                stage('App Lint') {
+                    steps {
+                        container('build') {
+                            sh '''
+                                if [ -f package.json ]; then
+                                    npm ci
+                                    npm run lint --if-present
+                                elif [ -f requirements.txt ]; then
+                                    pip install ruff
+                                    ruff check .
+                                fi
+                            '''
+                        }
+                    }
+                }
+                stage('IaC Lint') {
+                    when { changeset 'terraform/**' }
+                    steps {
+                        container('terraform') {
+                            sh '''
+                                cd terraform/azure
+                                terraform init -backend=false
+                                terraform validate
+                            '''
+                        }
+                    }
+                }
+                stage('Helm Lint') {
+                    when { changeset 'helm/**' }
+                    steps {
+                        container('tools') {
+                            sh 'helm lint helm/base-service/'
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Stage 3: Unit Tests ──────────────────────────────────────
+        stage('Test') {
+            steps {
+                container('build') {
+                    sh '''
+                        if [ -f package.json ]; then
+                            npm test -- --coverage --ci
+                        elif [ -f pom.xml ]; then
+                            ./mvnw test -B
+                        elif [ -f requirements.txt ]; then
+                            pip install pytest pytest-cov
+                            pytest --cov=. --cov-report=xml
+                        fi
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: '**/test-results/*.xml'
+                    publishCoverage(
+                        adapters: [coberturaAdapter('**/coverage.xml')],
+                        sourceFileResolver: sourceFiles('STORE_ALL_BUILD')
+                    )
+                }
+            }
+        }
+
+        // ─── Stage 4: SAST ────────────────────────────────────────────
+        stage('SAST') {
+            steps {
+                container('build') {
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                            npm install -g sonarqube-scanner 2>/dev/null || \
+                            pip install pysonar-scanner 2>/dev/null || true
+                            sonar-scanner \
+                              -Dsonar.projectKey=${JOB_BASE_NAME} \
+                              -Dsonar.projectName="${JOB_BASE_NAME}" \
+                              -Dsonar.sources=. \
+                              -Dsonar.host.url=${SONAR_URL}
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ─── Stage 5: IaC Security ────────────────────────────────────
+        stage('IaC Security') {
+            when { changeset 'terraform/**' }
+            steps {
+                container('tools') {
+                    sh '''
+                        pip install checkov 2>/dev/null || apk add python3 && pip3 install checkov
+                        checkov -d terraform/ --framework terraform --output cli
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 6: Build Docker Image ──────────────────────────────
+        stage('Build Image') {
+            steps {
+                container('docker') {
+                    sh '''
+                        docker build \
+                          --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+                          --build-arg VCS_REF=${GIT_COMMIT} \
+                          --build-arg VERSION=${IMAGE_TAG} \
+                          --label "org.opencontainers.image.revision=${GIT_COMMIT}" \
+                          -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                          -t ${IMAGE_NAME}:latest \
+                          -f docker/Dockerfile.node .
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 7: Container Security Scan ────────────────────────
+        stage('Container Scan') {
+            steps {
+                container('trivy') {
+                    sh '''
+                        trivy image \
+                          --exit-code 1 \
+                          --severity CRITICAL,HIGH \
+                          --no-progress \
+                          --format table \
+                          ${IMAGE_NAME}:${IMAGE_TAG}
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 8: Push Image ──────────────────────────────────────
+        stage('Push Image') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                    branch 'staging'
+                }
+            }
+            steps {
+                container('docker') {
+                    sh '''
+                        echo ${REGISTRY_CREDS_PSW} | docker login ${REGISTRY} \
+                          -u ${REGISTRY_CREDS_USR} --password-stdin
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                        docker push ${IMAGE_NAME}:latest
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 9: Deploy Dev ──────────────────────────────────────
+        stage('Deploy Dev') {
+            when { branch 'develop' }
+            environment {
+                KUBECONFIG = "${KUBECONFIG_DEV}"
+            }
+            steps {
+                container('tools') {
+                    sh '''
+                        helm upgrade --install ${JOB_BASE_NAME}-dev ./helm/base-service \
+                          --namespace dev --create-namespace \
+                          --set image.tag=${IMAGE_TAG} \
+                          --set environment=dev \
+                          --wait --timeout 5m
+                    '''
+                }
+            }
+        }
+
+        // ─── Stage 10: Deploy Production ─────────────────────────────
+        stage('Deploy Production') {
+            when { branch 'main' }
+            environment {
+                KUBECONFIG = "${KUBECONFIG_PROD}"
+            }
+            input {
+                message "Deploy ${IMAGE_TAG} to Production?"
+                ok "Deploy"
+                parameters {
+                    choice(name: 'STRATEGY', choices: ['canary', 'rolling', 'blue-green'], description: 'Deployment strategy')
+                }
+            }
+            steps {
+                container('tools') {
+                    sh '''
+                        helm upgrade --install ${JOB_BASE_NAME}-prod ./helm/base-service \
+                          --namespace production --create-namespace \
+                          --set image.tag=${IMAGE_TAG} \
+                          --set environment=production \
+                          --set replicaCount=3 \
+                          --wait --timeout 10m
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '**/sbom.spdx.json', allowEmptyArchive: true
+            cleanWs()
+        }
+        success {
+            slackSend(
+                webhookSecretTokenCredentialId: 'slack-webhook',
+                channel: '#deployments',
+                color: 'good',
+                message: "✅ *${JOB_NAME}* build #${BUILD_NUMBER} succeeded — `${IMAGE_TAG}` | <${BUILD_URL}|View>"
+            )
+        }
+        failure {
+            slackSend(
+                webhookSecretTokenCredentialId: 'slack-webhook',
+                channel: '#deployments',
+                color: 'danger',
+                message: "❌ *${JOB_NAME}* build #${BUILD_NUMBER} FAILED — <${BUILD_URL}|View Logs>"
+            )
+        }
+    }
+}

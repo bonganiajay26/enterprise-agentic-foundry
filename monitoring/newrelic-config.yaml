@@ -1,0 +1,65 @@
+# New Relic Kubernetes Integration
+# Deploy via Helm: helm install newrelic-bundle newrelic/nri-bundle
+
+# values for nri-bundle helm chart
+global:
+  licenseKey: "${NEW_RELIC_LICENSE_KEY}"
+  cluster: "${CLUSTER_NAME}"
+  lowDataMode: false
+
+newrelic-infrastructure:
+  enabled: true
+  privileged: true
+  tolerations:
+    - operator: "Exists"
+  resources:
+    limits:
+      memory: 300Mi
+    requests:
+      cpu: 100m
+      memory: 150Mi
+
+kube-state-metrics:
+  enabled: true
+
+nri-kube-events:
+  enabled: true
+
+nri-metadata-injection:
+  enabled: true
+
+newrelic-logging:
+  enabled: true
+  lowDataMode: false
+  fluentBit:
+    config:
+      extraRecords:
+        - key: cluster
+          value: "${CLUSTER_NAME}"
+        - key: environment
+          value: "${ENVIRONMENT}"
+
+nri-prometheus:
+  enabled: true
+  config:
+    standalone: false
+    kubernetes:
+      integrations_filter:
+        enabled: true
+        source_labels: ["app.kubernetes.io/name"]
+        app_values: ["redis", "traefik", "calico"]
+
+newrelic-pixie:
+  enabled: false
+
+pixie-chart:
+  enabled: false
+
+newrelic-k8s-metrics-adapter:
+  enabled: false
+
+# APM: agent configuration per language
+# For Node.js: add "newrelic" package, set NEW_RELIC_APP_NAME env var
+# For Java:    download newrelic.jar, set -javaagent:/newrelic/newrelic.jar
+# For Python:  pip install newrelic, set NEW_RELIC_CONFIG_FILE env var
+# For .NET:    use NewRelic.Agent nuget package

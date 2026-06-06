@@ -1,0 +1,53 @@
+# Multi-stage .NET 8 production Dockerfile
+# Supports: ASP.NET Core 8, .NET Worker Services, Minimal APIs
+
+# ─── Stage 1: Restore ─────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS restore
+WORKDIR /app
+COPY *.sln ./
+COPY src/**/*.csproj ./
+RUN find . -name "*.csproj" | while read f; do \
+      mkdir -p "$(dirname $f)"; \
+      cp "$f" "$(dirname $f)/"; \
+    done
+RUN dotnet restore --runtime linux-musl-x64
+
+# ─── Stage 2: Build ───────────────────────────────────────────────────
+FROM restore AS builder
+COPY . .
+RUN dotnet publish src/Api/Api.csproj \
+    --configuration Release \
+    --runtime linux-musl-x64 \
+    --self-contained true \
+    --output /publish \
+    /p:PublishTrimmed=true \
+    /p:PublishSingleFile=false \
+    /p:UseAppHost=true
+
+# ─── Stage 3: Production ──────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-alpine AS runner
+WORKDIR /app
+
+ENV ASPNETCORE_URLS=http://+:8080
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV DOTNET_GCConserveMemory=9
+
+# Security: non-root user
+RUN addgroup --system --gid 1001 dotnetgroup \
+    && adduser --system --uid 1001 --ingroup dotnetgroup appuser
+
+COPY --from=builder --chown=appuser:dotnetgroup /publish .
+
+LABEL org.opencontainers.image.title=".NET Application" \
+      org.opencontainers.image.vendor="Your Org" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD wget --quiet --tries=1 --spider http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["./Api"]

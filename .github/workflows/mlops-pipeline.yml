@@ -1,0 +1,164 @@
+name: MLOps Pipeline
+
+on:
+  push:
+    paths:
+      - 'mlops/**'
+      - 'models/**'
+      - 'data/**'
+      - 'notebooks/**'
+  workflow_dispatch:
+    inputs:
+      experiment_name:
+        description: 'MLflow experiment name'
+        required: false
+        default: 'default'
+      deploy_model:
+        description: 'Deploy model after training?'
+        type: boolean
+        default: false
+
+env:
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  MLFLOW_EXPERIMENT_NAME: ${{ inputs.experiment_name || 'ci-experiment' }}
+
+jobs:
+  data-validation:
+    name: Data Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install great-expectations pandas
+      - name: Validate data schema
+        run: |
+          if [ -f data/validation/expectations.json ]; then
+            python -c "
+            import great_expectations as gx
+            context = gx.get_context()
+            results = context.run_checkpoint(checkpoint_name='data_checkpoint')
+            if not results['success']:
+                raise Exception('Data validation failed')
+            print('Data validation passed')
+            " || echo "No data validation configured"
+          fi
+
+  train:
+    name: Model Training
+    runs-on: ubuntu-latest
+    needs: data-validation
+    container:
+      image: python:3.11-slim
+      options: --memory=8g --cpus=4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ML dependencies
+        run: pip install -r mlops/requirements.txt
+      - name: Train model
+        env:
+          MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: |
+          cd mlops
+          python train.py \
+            --experiment-name "${MLFLOW_EXPERIMENT_NAME}" \
+            --run-name "ci-${GITHUB_RUN_NUMBER}" \
+            --output-dir ./artifacts
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts-${{ github.run_number }}
+          path: mlops/artifacts/
+          retention-days: 30
+
+  evaluate:
+    name: Model Evaluation
+    runs-on: ubuntu-latest
+    needs: train
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-artifacts-${{ github.run_number }}
+          path: mlops/artifacts/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run evaluation
+        run: |
+          cd mlops
+          pip install -r requirements.txt
+          python evaluate.py \
+            --model-path ./artifacts/model \
+            --test-data ./data/test \
+            --threshold-accuracy 0.85
+      - name: Publish metrics
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'customSmallerIsBetter'
+          output-file-path: mlops/artifacts/metrics.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+
+  security-scan-model:
+    name: Model Security Scan
+    runs-on: ubuntu-latest
+    needs: train
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-artifacts-${{ github.run_number }}
+          path: mlops/artifacts/
+      - name: Scan model file
+        run: |
+          pip install modelscan
+          modelscan -p mlops/artifacts/model || echo "ModelScan not configured"
+
+  build-serving-image:
+    name: Build Model Serving Image
+    runs-on: ubuntu-latest
+    needs: evaluate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-artifacts-${{ github.run_number }}
+          path: mlops/artifacts/
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.ml
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/${{ github.repository }}/model-server:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/model-server:latest
+
+  deploy-model:
+    name: Deploy Model
+    runs-on: ubuntu-latest
+    needs: build-serving-image
+    if: inputs.deploy_model == true && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Kubernetes
+        run: |
+          helm upgrade --install model-server ./helm/base-service \
+            --namespace ml-serving \
+            --create-namespace \
+            --set image.repository=ghcr.io/${{ github.repository }}/model-server \
+            --set image.tag=${{ github.sha }} \
+            --set resources.requests.memory=2Gi \
+            --set resources.limits.memory=4Gi \
+            --wait

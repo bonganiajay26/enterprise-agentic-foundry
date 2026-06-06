@@ -1,0 +1,100 @@
+# Multi-stage Frontend Dockerfile
+# Supports: React, Angular, Vue, Next.js, Nuxt
+# Served via hardened Nginx
+
+# ─── Stage 1: Build ───────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+ARG BUILD_ENV=production
+ENV NODE_ENV=${BUILD_ENV}
+
+# Dependency caching
+COPY package*.json ./
+RUN npm ci --only=production=false
+
+COPY . .
+
+# Framework-agnostic build (override BUILD_CMD at build time)
+ARG BUILD_CMD="npm run build"
+RUN eval "${BUILD_CMD}"
+
+# ─── Stage 2: Nginx Production ────────────────────────────────────────
+FROM nginx:1.27-alpine AS runner
+
+# Remove default nginx config
+RUN rm /etc/nginx/conf.d/default.conf
+
+# Hardened nginx config
+COPY --from=builder /app/dist /usr/share/nginx/html
+# OR for Next.js: COPY --from=builder /app/.next/static /usr/share/nginx/html/_next/static
+
+COPY <<'EOF' /etc/nginx/conf.d/app.conf
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Security headers
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:; frame-ancestors 'none';" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+    # Remove server version
+    server_tokens off;
+
+    # Gzip
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/xml+rss application/atom+xml image/svg+xml;
+
+    # SPA routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Static asset caching
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 "OK";
+        add_header Content-Type text/plain;
+    }
+
+    # Block hidden files
+    location ~ /\. {
+        deny all;
+    }
+}
+EOF
+
+# Non-root: nginx listens on 8080
+RUN chown -R nginx:nginx /usr/share/nginx/html \
+    && chown -R nginx:nginx /var/cache/nginx \
+    && chown -R nginx:nginx /var/log/nginx \
+    && chown -R nginx:nginx /etc/nginx/conf.d \
+    && touch /var/run/nginx.pid \
+    && chown -R nginx:nginx /var/run/nginx.pid
+
+LABEL org.opencontainers.image.title="Frontend Application" \
+      org.opencontainers.image.vendor="Your Org"
+
+USER nginx
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --quiet --tries=1 --spider http://localhost:8080/health || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

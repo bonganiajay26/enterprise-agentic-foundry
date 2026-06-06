@@ -1,0 +1,123 @@
+# Datadog Agent — Kubernetes DaemonSet
+# Provides: APM, metrics, logs, NPM, security monitoring
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: datadog
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: datadog-secret
+  namespace: datadog
+type: Opaque
+stringData:
+  api-key: "${DD_API_KEY}"
+  app-key: "${DD_APP_KEY}"
+---
+# Datadog Operator (preferred over raw DaemonSet)
+# Install via: helm install datadog-operator datadog/datadog-operator
+apiVersion: datadoghq.com/v2alpha1
+kind: DatadogAgent
+metadata:
+  name: datadog
+  namespace: datadog
+spec:
+  global:
+    credentials:
+      apiSecret:
+        secretName: datadog-secret
+        keyName: api-key
+      appSecret:
+        secretName: datadog-secret
+        keyName: app-key
+    clusterName: "${CLUSTER_NAME}"
+    site: "datadoghq.com"
+    tags:
+      - "env:${ENVIRONMENT}"
+      - "cluster:${CLUSTER_NAME}"
+      - "platform:universal-devops"
+
+  features:
+    apm:
+      enabled: true
+      instrumentation:
+        enabled: true
+        enabledNamespaces:
+          - default
+          - production
+          - staging
+        libVersions:
+          java: "1"
+          python: "2"
+          js: "5"
+          dotnet: "3"
+
+    logCollection:
+      enabled: true
+      containerCollectAll: true
+      containerCollectUsingFiles: true
+
+    liveProcessCollection:
+      enabled: true
+
+    liveContainerCollection:
+      enabled: true
+
+    orchestratorExplorer:
+      enabled: true
+
+    networkMonitoring:
+      enabled: true
+
+    usm:
+      enabled: true
+
+    # Security: Cloud Security Management + CSPM
+    cspm:
+      enabled: true
+      checkInterval: 3m
+
+    cws:
+      enabled: true
+      network:
+        enabled: true
+      syscallMonitorEnabled: true
+
+    npm:
+      enabled: true
+
+    admissionController:
+      enabled: true
+      mutateUnlabelled: false
+      serviceAccountName: datadog-admission-controller
+
+    remoteConfiguration:
+      enabled: true
+
+  override:
+    nodeAgent:
+      image:
+        tag: "7-jmx"
+      containers:
+        agent:
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      tolerations:
+        - operator: Exists
+
+    clusterAgent:
+      replicas: 2
+      resources:
+        requests:
+          cpu: "200m"
+          memory: "256Mi"
+        limits:
+          cpu: "1000m"
+          memory: "1Gi"
