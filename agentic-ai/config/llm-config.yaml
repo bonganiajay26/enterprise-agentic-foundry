@@ -246,6 +246,9 @@ providers:
 agent_overrides:
   supervisor_agent:          { profile: production-default }
   repo_analysis_agent:       { profile: high-reasoning }
+  build_test_agent:          { profile: production-default, routing_strategy: cost }
+  infrastructure_deployment_agent: { profile: high-reasoning, routing_strategy: compliance }
+  monitoring_rca_agent:      { profile: high-reasoning, routing_strategy: latency }
   governance_agent:          { profile: production-default }
   remediation_agent:         { profile: high-reasoning, routing_strategy: compliance }
   architecture_agent:        { profile: high-reasoning }
