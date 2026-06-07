@@ -1,0 +1,131 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: ai-agentic-project
+  title: AI / Agentic Application
+  description: >
+    Scaffold a production-ready AI/Agentic application with:
+    LangGraph agents, RAG pipeline (Qdrant), OpenAI/Azure OpenAI integration,
+    FastAPI serving layer, MCP server, audit logging, safety filters,
+    Prometheus metrics, Docker, Helm, and CI/CD.
+  tags: [ai, langchain, langgraph, rag, agents, python]
+spec:
+  owner: platform-team
+  type: service
+  parameters:
+    - title: Project Details
+      required: [projectName, description, owner, aiProvider]
+      properties:
+        projectName:
+          title: Project Name
+          type: string
+          pattern: '^[a-z][a-z0-9-]*$'
+        description:
+          title: Description
+          type: string
+        owner:
+          title: Owner
+          type: string
+          ui:field: OwnerPicker
+          ui:options:
+            allowedKinds: [Group]
+        aiProvider:
+          title: AI Provider
+          type: string
+          enum: [azure-openai, openai, vertex-ai]
+          enumNames: [Azure OpenAI, OpenAI, Google Vertex AI]
+        enableRag:
+          title: Enable RAG (Retrieval Augmented Generation)?
+          type: boolean
+          default: true
+        vectorDatabase:
+          title: Vector Database
+          type: string
+          default: qdrant
+          enum: [qdrant, pinecone, pgvector, azure-ai-search]
+          enumNames: [Qdrant (self-hosted), Pinecone (cloud), pgvector (PostgreSQL), Azure AI Search]
+          ui:if: enableRag
+        agentFramework:
+          title: Agent Framework
+          type: string
+          enum: [langgraph, autogen, both]
+          enumNames: [LangGraph, AutoGen, Both]
+        enableMcp:
+          title: Include MCP Server?
+          type: boolean
+          default: true
+        cloudProvider:
+          title: Cloud Provider
+          type: string
+          enum: [azure, aws, gcp]
+          enumNames: [Azure, AWS, GCP]
+
+    - title: Agent Configuration
+      properties:
+        agents:
+          title: Select Agents to Include
+          type: array
+          items:
+            type: string
+            enum: [supervisor, devops, security, cost, architecture, documentation, incident, performance, kubernetes]
+          ui:widget: checkboxes
+          ui:options:
+            inline: true
+          default: [supervisor, devops, security]
+
+    - title: Repository
+      required: [repoOwner, repoName]
+      properties:
+        repoOwner:
+          title: GitHub Organization
+          type: string
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts: [github.com]
+        repoName:
+          title: Repository Name
+          type: string
+          default: ${{ parameters.projectName }}
+
+  steps:
+    - id: fetch-ai-template
+      name: Fetch AI Project Template
+      action: fetch:template
+      input:
+        url: ./skeletons/ai-project
+        values:
+          projectName: ${{ parameters.projectName }}
+          description: ${{ parameters.description }}
+          aiProvider: ${{ parameters.aiProvider }}
+          enableRag: ${{ parameters.enableRag }}
+          vectorDatabase: ${{ parameters.vectorDatabase }}
+          agentFramework: ${{ parameters.agentFramework }}
+          enableMcp: ${{ parameters.enableMcp }}
+          agents: ${{ parameters.agents }}
+          cloudProvider: ${{ parameters.cloudProvider }}
+
+    - id: create-repo
+      name: Create Repository
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        description: ${{ parameters.description }}
+        repoUrl: github.com?owner=${{ parameters.repoOwner }}&repo=${{ parameters.repoName }}
+        repoVisibility: private
+        defaultBranch: main
+        protectDefaultBranch: true
+
+    - id: register
+      name: Register in Backstage
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['create-repo'].output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['create-repo'].output.remoteUrl }}
+      - title: Open in Catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}

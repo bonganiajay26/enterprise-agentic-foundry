@@ -1,0 +1,86 @@
+# Grafana Loki — Log Aggregation Backend
+# Receives logs from: Promtail, Alloy, OpenTelemetry Collector
+# Storage: Object store for production (S3/Azure Blob/GCS)
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem  # Change to s3/azure/gcs for production
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ingester:
+  chunk_idle_period: 3m
+  chunk_block_size: 262144
+  chunk_retain_period: 1m
+  max_transfer_retries: 0
+  lifecycler:
+    ring:
+      replication_factor: 1
+
+limits_config:
+  max_cache_freshness_per_query: 10m
+  split_queries_by_interval: 15m
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h  # 7 days
+  ingestion_rate_mb: 64
+  ingestion_burst_size_mb: 128
+  max_query_series: 10000
+  max_entries_limit_per_query: 50000
+  retention_period: 744h  # 31 days
+
+ruler:
+  alertmanager_url: http://alertmanager:9093
+  rule_path: /loki/rules-temp
+  ring:
+    kvstore:
+      store: inmemory
+  remote_write:
+    enabled: true
+    clients:
+      prometheus:
+        url: http://prometheus:9090/api/v1/write
+
+analytics:
+  reporting_enabled: false
+
+# Production storage config (Azure example):
+# storage_config:
+#   azure:
+#     account_name: ${AZURE_STORAGE_ACCOUNT}
+#     account_key: ${AZURE_STORAGE_KEY}
+#     container_name: loki-logs
+#     use_managed_identity: true
+#   tsdb_shipper:
+#     active_index_directory: /loki/tsdb-index
+#     cache_location: /loki/tsdb-cache
+#     shared_store: azure

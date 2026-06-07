@@ -1,0 +1,86 @@
+spring:
+  application:
+    name: ${SERVICE_NAME:service-template}
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:production}
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html,text/plain
+  tomcat:
+    accesslog:
+      enabled: false  # Use structured logging instead
+    threads:
+      max: 200
+      min-spare: 10
+
+# Graceful shutdown timeout
+spring.lifecycle.timeout-per-shutdown-phase: 30s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+      base-path: /
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true  # Kubernetes liveness/readiness probes
+    prometheus:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      service: ${spring.application.name}
+      environment: ${ENVIRONMENT:production}
+
+# OpenTelemetry
+management.tracing:
+  sampling:
+    probability: ${OTEL_SAMPLING_RATE:0.1}
+
+otel:
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:}
+
+# Resilience4j defaults
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 5
+  retry:
+    configs:
+      default:
+        max-attempts: 3
+        wait-duration: 500ms
+        exponential-backoff-multiplier: 2
+  ratelimiter:
+    configs:
+      default:
+        limit-for-period: 100
+        limit-refresh-period: 1s
+        timeout-duration: 0
+
+# Logging — JSON in production
+logging:
+  level:
+    root: INFO
+    com.platform: DEBUG
+  pattern:
+    console: "%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n"

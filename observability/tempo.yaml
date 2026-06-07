@@ -1,0 +1,92 @@
+# Grafana Tempo — Distributed Tracing Backend
+# Receives: OTLP, Zipkin, Jaeger
+# Storage: Object store (S3/Azure Blob/GCS) for production
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    zipkin:
+      endpoint: 0.0.0.0:9411
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: 0.0.0.0:14268
+        grpc:
+          endpoint: 0.0.0.0:14250
+
+ingester:
+  max_block_duration: 5m
+  lifecycler:
+    ring:
+      replication_factor: 1
+
+compactor:
+  compaction:
+    block_retention: 336h  # 14 days
+
+storage:
+  trace:
+    backend: local  # Change to s3/azure/gcs for production
+    local:
+      path: /tmp/tempo/traces
+    # Production — Azure:
+    # backend: azure
+    # azure:
+    #   container-name: tempo-traces
+    #   storage-account-name: ${AZURE_STORAGE_ACCOUNT}
+    #   storage-account-key: ${AZURE_STORAGE_KEY}
+    # Production — AWS:
+    # backend: s3
+    # s3:
+    #   bucket: your-tempo-traces-bucket
+    #   region: us-east-1
+    wal:
+      path: /tmp/tempo/wal
+      resource_id: tempo
+    block:
+      bloom_filter_false_positive: 0.05
+      index_downsample_bytes: 1000
+      encoding: zstd
+
+querier:
+  max_concurrent_queries: 20
+  search:
+    query_timeout: 30s
+  frontend_worker:
+    frontend_address: 127.0.0.1:9095
+
+query_frontend:
+  max_outstanding_per_tenant: 2000
+  search:
+    concurrent_jobs: 2000
+    target_bytes_per_job: 104857600
+  trace_by_id:
+    query_shards: 50
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: ${CLUSTER_NAME}
+  storage:
+    path: /tmp/tempo/generator/wal
+  processors: [service-graphs, span-metrics]
+  processor:
+    service_graphs:
+      histogram_buckets: [0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8]
+      max_items: 10000
+      wait: 10s
+      workers: 10
+    span_metrics:
+      histogram_buckets: [0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024, 2.048, 4.096, 8.192, 16.384]
+      enable_target_info: true

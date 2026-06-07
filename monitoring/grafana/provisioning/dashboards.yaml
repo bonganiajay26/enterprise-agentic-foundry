@@ -1,0 +1,43 @@
+# Grafana Dashboard Provisioning
+# Auto-loads dashboards from the dashboards/ directory
+
+apiVersion: 1
+
+providers:
+  - name: Platform Dashboards
+    orgId: 1
+    folder: Platform
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/platform
+      foldersFromFilesStructure: true
+
+  - name: SLO Dashboards
+    orgId: 1
+    folder: SLOs
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards/slos
+
+  - name: Kubernetes Dashboards
+    orgId: 1
+    folder: Kubernetes
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 300
+    options:
+      path: /var/lib/grafana/dashboards/kubernetes
+
+  - name: AI Agent Dashboards
+    orgId: 1
+    folder: AI Agents
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards/agents

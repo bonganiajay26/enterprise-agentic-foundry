@@ -1,0 +1,70 @@
+# Backstage catalog entry for the platform itself
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: universal-agentic-devops-platform
+  title: Universal Agentic DevOps Platform
+  description: Enterprise-grade platform engineering framework for any project
+  tags:
+    - platform
+    - devops
+    - kubernetes
+    - agentic-ai
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    github.com/project-slug: your-org/enterprise-agentic-foundry
+spec:
+  owner: platform-team
+  domain: platform-engineering
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: platform-backstage
+  title: Backstage IDP
+  description: Internal Developer Portal — self-service platform
+  tags: [backstage, idp, platform]
+  annotations:
+    backstage.io/kubernetes-id: backstage
+    backstage.io/techdocs-ref: dir:backstage/
+spec:
+  type: service
+  lifecycle: production
+  owner: platform-team
+  system: universal-agentic-devops-platform
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: platform-agentic-ai
+  title: Agentic AI Platform
+  description: LangGraph + AutoGen multi-agent platform
+  tags: [ai, langchain, langgraph, autogen, mcp]
+  annotations:
+    backstage.io/techdocs-ref: dir:agentic-ai/
+spec:
+  type: service
+  lifecycle: production
+  owner: platform-team
+  system: universal-agentic-devops-platform
+---
+apiVersion: backstage.io/v1alpha1
+kind: Group
+metadata:
+  name: platform-team
+  title: Platform Engineering Team
+  description: Owns and operates the Universal Platform
+spec:
+  type: team
+  profile:
+    email: platform@your-org.com
+  children: []
+---
+apiVersion: backstage.io/v1alpha1
+kind: Domain
+metadata:
+  name: platform-engineering
+  title: Platform Engineering
+  description: Internal platform services and tooling
+spec:
+  owner: platform-team

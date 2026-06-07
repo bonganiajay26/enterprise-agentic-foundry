@@ -1,0 +1,42 @@
+{
+  "name": "nodejs-api-service",
+  "version": "1.0.0",
+  "description": "Production-ready Node.js API — Universal Platform Template",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "build": "echo 'No build step — pure Node.js'",
+    "lint": "eslint src/ --ext .js,.ts",
+    "test": "jest --coverage --detectOpenHandles",
+    "test:integration": "jest --config jest.integration.config.js",
+    "test:e2e": "jest --config jest.e2e.config.js"
+  },
+  "dependencies": {
+    "express": "^4.18.3",
+    "helmet": "^7.1.0",
+    "cors": "^2.8.5",
+    "compression": "^1.7.4",
+    "express-rate-limit": "^7.1.5",
+    "pino": "^8.17.2",
+    "pino-http": "^9.0.0",
+    "dotenv": "^16.4.1",
+    "joi": "^17.12.1",
+    "prom-client": "^15.1.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.42.0",
+    "@opentelemetry/sdk-node": "^0.48.0",
+    "@opentelemetry/exporter-otlp-http": "^0.48.0",
+    "@opentelemetry/resources": "^1.21.0",
+    "@opentelemetry/semantic-conventions": "^1.21.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.4",
+    "nodemon": "^3.0.3",
+    "eslint": "^8.56.0",
+    "eslint-config-airbnb-base": "^15.0.0"
+  }
+}

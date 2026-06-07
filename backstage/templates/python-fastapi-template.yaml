@@ -1,0 +1,116 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: python-fastapi-service
+  title: Python FastAPI Service
+  description: >
+    Scaffold a production-ready Python FastAPI microservice with:
+    async endpoints, Pydantic validation, Prometheus metrics, OpenTelemetry tracing,
+    structlog structured logging, Docker, Helm chart, CI/CD pipeline, and Backstage catalog entry.
+  tags: [python, fastapi, api, microservice, recommended]
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+spec:
+  owner: platform-team
+  type: service
+  parameters:
+    - title: Service Details
+      required: [serviceName, description, owner, pythonVersion]
+      properties:
+        serviceName:
+          title: Service Name
+          type: string
+          pattern: '^[a-z][a-z0-9-]*$'
+          description: Kebab-case name (e.g. user-service)
+          ui:autofocus: true
+        description:
+          title: Description
+          type: string
+        owner:
+          title: Owner
+          type: string
+          ui:field: OwnerPicker
+          ui:options:
+            allowedKinds: [Group]
+        pythonVersion:
+          title: Python Version
+          type: string
+          default: '3.11'
+          enum: ['3.11', '3.12']
+
+    - title: Infrastructure
+      required: [cloudProvider, databaseType]
+      properties:
+        cloudProvider:
+          title: Cloud Provider
+          type: string
+          enum: [azure, aws, gcp]
+          enumNames: [Azure, AWS, GCP]
+        databaseType:
+          title: Database
+          type: string
+          enum: [none, postgresql, mysql, mongodb]
+          enumNames: [None, PostgreSQL, MySQL, MongoDB]
+        enableRedis:
+          title: Redis Cache
+          type: boolean
+          default: false
+        enableCelery:
+          title: Celery Task Queue
+          type: boolean
+          default: false
+
+    - title: Repository
+      required: [repoOwner, repoName]
+      properties:
+        repoOwner:
+          title: GitHub Organization
+          type: string
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts: [github.com]
+        repoName:
+          title: Repository Name
+          type: string
+          default: ${{ parameters.serviceName }}
+
+  steps:
+    - id: fetch-base
+      name: Fetch FastAPI Template
+      action: fetch:template
+      input:
+        url: ./skeletons/python-fastapi
+        values:
+          serviceName: ${{ parameters.serviceName }}
+          description: ${{ parameters.description }}
+          pythonVersion: ${{ parameters.pythonVersion }}
+          cloudProvider: ${{ parameters.cloudProvider }}
+          databaseType: ${{ parameters.databaseType }}
+          enableRedis: ${{ parameters.enableRedis }}
+
+    - id: create-repo
+      name: Create Repository
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        description: ${{ parameters.description }}
+        repoUrl: github.com?owner=${{ parameters.repoOwner }}&repo=${{ parameters.repoName }}
+        repoVisibility: private
+        defaultBranch: main
+        protectDefaultBranch: true
+        requireCodeOwnerReviews: true
+
+    - id: register
+      name: Register in Backstage
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['create-repo'].output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['create-repo'].output.remoteUrl }}
+      - title: Open in Catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}

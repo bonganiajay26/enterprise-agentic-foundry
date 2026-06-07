@@ -1,0 +1,89 @@
+# Grafana Datasource Provisioning
+# Auto-configures all observability backends
+
+apiVersion: 1
+
+datasources:
+  # ─── Prometheus ─────────────────────────────────────────────────────
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    uid: prometheus-uid
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: traceID
+          datasourceUid: tempo-uid
+      prometheusType: Prometheus
+      prometheusVersion: 2.48.0
+      incrementalQuerying: true
+      incrementalQueryOverlapWindow: 10m
+      cacheLevel: High
+    editable: false
+
+  # ─── Loki ────────────────────────────────────────────────────────────
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki-uid
+    jsonData:
+      derivedFields:
+        - datasourceUid: tempo-uid
+          matcherRegex: '"traceId":"(\w+)"'
+          name: TraceID
+          url: "$${__value.raw}"
+          urlDisplayLabel: View Trace
+        - datasourceUid: tempo-uid
+          matcherRegex: 'traceId=(\w+)'
+          name: TraceIDPlain
+          url: "$${__value.raw}"
+    editable: false
+
+  # ─── Tempo ───────────────────────────────────────────────────────────
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo-uid
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki-uid
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        query: '{namespace="${__span.tags.namespace}"} |= "${__trace.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prometheus-uid
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+        tags:
+          - key: service.name
+            value: service
+          - key: job
+        queries:
+          - name: Request Rate
+            query: 'sum(rate(traces_spanmetrics_calls_total{$__tags}[$__rate_interval]))'
+      serviceMap:
+        datasourceUid: prometheus-uid
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      lokiSearch:
+        datasourceUid: loki-uid
+    editable: false
+
+  # ─── Alertmanager ────────────────────────────────────────────────────
+  - name: Alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    uid: alertmanager-uid
+    jsonData:
+      implementation: prometheus
+    editable: false

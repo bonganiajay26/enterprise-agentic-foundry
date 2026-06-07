@@ -1,0 +1,130 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: data-engineering-pipeline
+  title: Data Engineering Pipeline
+  description: >
+    Scaffold a production-ready data engineering project with:
+    Apache Airflow DAGs or Prefect flows, PySpark/Pandas processing,
+    dbt for data transformation, data quality checks (Great Expectations),
+    cloud data warehouse integration (Snowflake/BigQuery/Redshift),
+    Docker, Kubernetes CronJob, monitoring, and CI/CD.
+  tags: [data-engineering, airflow, spark, dbt, python]
+spec:
+  owner: platform-team
+  type: service
+  parameters:
+    - title: Pipeline Details
+      required: [pipelineName, description, owner, orchestrator]
+      properties:
+        pipelineName:
+          title: Pipeline Name
+          type: string
+          pattern: '^[a-z][a-z0-9_]*$'
+          description: Snake_case name (e.g. user_events_pipeline)
+        description:
+          title: Description
+          type: string
+        owner:
+          title: Owner
+          type: string
+          ui:field: OwnerPicker
+          ui:options:
+            allowedKinds: [Group]
+        orchestrator:
+          title: Orchestration Framework
+          type: string
+          enum: [airflow, prefect, dagster, argo-workflows]
+          enumNames: [Apache Airflow, Prefect, Dagster, Argo Workflows]
+        processingFramework:
+          title: Processing Framework
+          type: string
+          enum: [pandas, pyspark, polars, dbt]
+          enumNames: [Pandas, PySpark, Polars, dbt (SQL transforms)]
+        schedule:
+          title: Schedule (Cron)
+          type: string
+          default: '0 2 * * *'
+          description: 'Cron expression (default: daily at 02:00 UTC)'
+
+    - title: Data Sources & Destinations
+      properties:
+        sourceType:
+          title: Data Source Type
+          type: string
+          enum: [s3, blob, gcs, kafka, postgresql, api, sftp]
+          enumNames: [S3/ADLS, Azure Blob, GCS, Kafka, PostgreSQL, REST API, SFTP]
+        destinationType:
+          title: Destination (Data Warehouse)
+          type: string
+          enum: [snowflake, bigquery, redshift, synapse, databricks]
+          enumNames: [Snowflake, BigQuery, Redshift, Azure Synapse, Databricks]
+        enableDataQuality:
+          title: Enable Data Quality Checks (Great Expectations)?
+          type: boolean
+          default: true
+        enableLineage:
+          title: Enable Data Lineage (OpenLineage)?
+          type: boolean
+          default: false
+        cloudProvider:
+          title: Cloud Provider
+          type: string
+          enum: [azure, aws, gcp]
+
+    - title: Repository
+      required: [repoOwner, repoName]
+      properties:
+        repoOwner:
+          title: GitHub Organization
+          type: string
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts: [github.com]
+        repoName:
+          title: Repository Name
+          type: string
+          default: ${{ parameters.pipelineName }}-pipeline
+
+  steps:
+    - id: fetch-data-template
+      name: Fetch Data Pipeline Template
+      action: fetch:template
+      input:
+        url: ./skeletons/data-pipeline
+        values:
+          pipelineName: ${{ parameters.pipelineName }}
+          description: ${{ parameters.description }}
+          orchestrator: ${{ parameters.orchestrator }}
+          processingFramework: ${{ parameters.processingFramework }}
+          schedule: ${{ parameters.schedule }}
+          sourceType: ${{ parameters.sourceType }}
+          destinationType: ${{ parameters.destinationType }}
+          enableDataQuality: ${{ parameters.enableDataQuality }}
+          cloudProvider: ${{ parameters.cloudProvider }}
+
+    - id: create-repo
+      name: Create Repository
+      action: publish:github
+      input:
+        allowedHosts: [github.com]
+        description: ${{ parameters.description }}
+        repoUrl: github.com?owner=${{ parameters.repoOwner }}&repo=${{ parameters.repoName }}
+        repoVisibility: private
+        defaultBranch: main
+        protectDefaultBranch: true
+
+    - id: register
+      name: Register in Backstage
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['create-repo'].output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['create-repo'].output.remoteUrl }}
+      - title: Open in Catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}
