@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_openai import AzureChatOpenAI
+from agentic_ai.llm import get_chat_model
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -462,13 +462,7 @@ Always write for the reader, not the writer.
 
 
 def call_model(state: DocumentationState) -> dict:
-    llm = AzureChatOpenAI(
-        azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        api_version="2025-01-01-preview",
-        temperature=0.2,
-    )
+    llm = get_chat_model(agent_name="documentation_agent", temperature=0.2)
     tools = [analyze_repository_structure, generate_readme, generate_runbook,
              generate_sop, generate_api_documentation, write_document_to_file]
     response = llm.bind_tools(tools).invoke([SystemMessage(content=SYSTEM_PROMPT)] + state["messages"])

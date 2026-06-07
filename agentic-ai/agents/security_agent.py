@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_openai import AzureChatOpenAI
+from agentic_ai.llm import get_chat_model
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -174,13 +174,7 @@ Always include CVE references and CVSS scores in vulnerability reports.
 
 
 def call_model(state: SecurityState) -> dict:
-    llm = AzureChatOpenAI(
-        azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        api_version="2025-01-01-preview",
-        temperature=0,
-    )
+    llm = get_chat_model(agent_name="security_agent", temperature=0)
     tools = [
         scan_container_image,
         scan_iac_directory,

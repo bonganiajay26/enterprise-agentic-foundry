@@ -1,0 +1,255 @@
+# ============================================================================
+# Universal LLM Provider Configuration
+# Provider-agnostic configuration for the Agentic AI Platform.
+# Loaded by agentic-ai/llm/provider_factory.py at agent startup.
+#
+# Resolution order (highest precedence first):
+#   1. Environment variable LLM_PROVIDER / LLM_MODEL (per-deployment override)
+#   2. This file's `active_profile`
+#   3. `default` profile
+# ============================================================================
+
+active_profile: ${LLM_PROFILE:-production-default}
+
+# ----------------------------------------------------------------------------
+# Routing strategy applied across the `providers` list for every agent call.
+#   cost        — prefer the cheapest provider/model that meets min_quality
+#   latency     — prefer the provider with the lowest p50 latency (from telemetry)
+#   quality     — always prefer the highest-capability model regardless of cost
+#   compliance  — restrict to providers/regions matching `compliance.allowed_regions`
+#                 and `compliance.data_residency`
+#   availability— prefer providers with the best rolling success-rate (circuit-breaker aware)
+#   weighted    — blend cost + latency + quality using `routing.weights`
+# ----------------------------------------------------------------------------
+routing:
+  strategy: weighted
+  weights:
+    cost: 0.30
+    latency: 0.30
+    quality: 0.30
+    availability: 0.10
+  max_fallback_hops: 3
+  circuit_breaker:
+    failure_threshold: 5
+    half_open_after_seconds: 60
+    error_window_seconds: 120
+
+# ----------------------------------------------------------------------------
+# Compliance / data-residency constraints — enforced BEFORE routing.
+# Any provider that fails these checks is removed from the candidate list.
+# ----------------------------------------------------------------------------
+compliance:
+  enforce: true
+  allowed_regions:
+    - eu-west-1
+    - eu-central-1
+    - us-east-1
+    - southafricanorth
+  data_residency: regional   # regional | global | on_prem_only
+  pii_redaction_required: true
+  allow_third_party_training_on_data: false
+
+# ----------------------------------------------------------------------------
+# Named profiles — pick a coherent set of providers/models per environment.
+# Switch profiles via LLM_PROFILE env var without code changes.
+# ----------------------------------------------------------------------------
+profiles:
+
+  # Local development — free / fast iteration, no cloud spend.
+  local-dev:
+    primary: ollama
+    fallbacks: [groq, openai]
+    default_model_overrides:
+      ollama: llama3.1:8b
+      groq: llama-3.3-70b-versatile
+      openai: gpt-4o-mini
+
+  # Cost-optimized production default — balances quality and spend.
+  production-default:
+    primary: azure_openai
+    fallbacks: [anthropic, openai, groq]
+    default_model_overrides:
+      azure_openai: gpt-4o
+      anthropic: claude-sonnet-4-6
+      openai: gpt-4o
+      groq: llama-3.3-70b-versatile
+
+  # Maximum capability — used for architecture/security/incident agents
+  # where reasoning quality matters more than cost or latency.
+  high-reasoning:
+    primary: anthropic
+    fallbacks: [azure_openai, vertex_ai, bedrock]
+    default_model_overrides:
+      anthropic: claude-opus-4-1
+      azure_openai: gpt-4o
+      vertex_ai: gemini-1.5-pro
+      bedrock: anthropic.claude-3-5-sonnet-20241022-v2:0
+
+  # Regulated / regional-compliance workloads — restricts to in-region,
+  # contractually-bound providers (no public OpenAI/Anthropic endpoints).
+  regulated-region:
+    primary: azure_openai
+    fallbacks: [bedrock, vertex_ai]
+    default_model_overrides:
+      azure_openai: gpt-4o
+      bedrock: anthropic.claude-3-5-sonnet-20241022-v2:0
+      vertex_ai: gemini-1.5-pro
+
+  # Air-gapped / private deployment — no external network calls permitted.
+  air-gapped:
+    primary: custom
+    fallbacks: [ollama]
+    default_model_overrides:
+      custom: enterprise-llama-70b-instruct
+      ollama: llama3.1:70b
+
+# ----------------------------------------------------------------------------
+# Provider registry — every supported provider, its connection contract,
+# pricing reference (USD per 1M tokens, in/out), and capability metadata.
+# `api_key_env` / `endpoint_env` point to environment variables — NEVER
+# store secrets here. Resolved at runtime via the platform's secret store
+# (Key Vault / Secrets Manager / Secret Manager / Vault).
+# ----------------------------------------------------------------------------
+providers:
+
+  openai:
+    type: openai
+    api_key_env: OPENAI_API_KEY
+    endpoint_env: OPENAI_BASE_URL          # optional — for OpenAI-compatible proxies
+    region: global
+    models:
+      gpt-4o:            { in_per_1m: 2.50,  out_per_1m: 10.00, context_window: 128000, quality_tier: high }
+      gpt-4o-mini:       { in_per_1m: 0.15,  out_per_1m: 0.60,  context_window: 128000, quality_tier: medium }
+      o1:                { in_per_1m: 15.00, out_per_1m: 60.00, context_window: 200000, quality_tier: highest }
+
+  azure_openai:
+    type: azure_openai
+    api_key_env: AZURE_OPENAI_API_KEY
+    endpoint_env: AZURE_OPENAI_ENDPOINT
+    api_version_env: AZURE_OPENAI_API_VERSION
+    deployment_env: AZURE_OPENAI_DEPLOYMENT
+    region: ${AZURE_OPENAI_REGION:-eastus}
+    compliance: [soc2, hipaa, fedramp_moderate, gdpr]
+    models:
+      gpt-4o:            { in_per_1m: 2.50,  out_per_1m: 10.00, context_window: 128000, quality_tier: high }
+      gpt-4o-mini:       { in_per_1m: 0.15,  out_per_1m: 0.60,  context_window: 128000, quality_tier: medium }
+
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    endpoint_env: ANTHROPIC_BASE_URL
+    region: global
+    compliance: [soc2, gdpr]
+    models:
+      claude-opus-4-1:   { in_per_1m: 15.00, out_per_1m: 75.00, context_window: 200000, quality_tier: highest }
+      claude-sonnet-4-6: { in_per_1m: 3.00,  out_per_1m: 15.00, context_window: 200000, quality_tier: high }
+      claude-haiku-4:    { in_per_1m: 0.80,  out_per_1m: 4.00,  context_window: 200000, quality_tier: medium }
+
+  gemini:
+    type: google_generative_ai
+    api_key_env: GOOGLE_API_KEY
+    region: global
+    models:
+      gemini-1.5-pro:    { in_per_1m: 1.25,  out_per_1m: 5.00,  context_window: 1000000, quality_tier: high }
+      gemini-1.5-flash:  { in_per_1m: 0.075, out_per_1m: 0.30,  context_window: 1000000, quality_tier: medium }
+
+  vertex_ai:
+    type: vertex_ai
+    project_id_env: GCP_PROJECT_ID
+    region_env: GCP_REGION
+    credentials_env: GOOGLE_APPLICATION_CREDENTIALS
+    region: ${GCP_REGION:-us-central1}
+    compliance: [soc2, hipaa, gdpr, fedramp_high]
+    models:
+      gemini-1.5-pro:    { in_per_1m: 1.25,  out_per_1m: 5.00,  context_window: 1000000, quality_tier: high }
+      gemini-1.5-flash:  { in_per_1m: 0.075, out_per_1m: 0.30,  context_window: 1000000, quality_tier: medium }
+
+  bedrock:
+    type: aws_bedrock
+    region_env: AWS_REGION
+    access_key_env: AWS_ACCESS_KEY_ID
+    secret_key_env: AWS_SECRET_ACCESS_KEY
+    role_arn_env: BEDROCK_ASSUME_ROLE_ARN   # preferred over static keys (IRSA)
+    region: ${AWS_REGION:-us-east-1}
+    compliance: [soc2, hipaa, fedramp_high, gdpr]
+    models:
+      anthropic.claude-3-5-sonnet-20241022-v2:0: { in_per_1m: 3.00, out_per_1m: 15.00, context_window: 200000, quality_tier: high }
+      amazon.titan-text-premier-v1:0:            { in_per_1m: 0.50, out_per_1m: 1.50,  context_window: 32000,  quality_tier: medium }
+      meta.llama3-1-70b-instruct-v1:0:           { in_per_1m: 0.72, out_per_1m: 0.72,  context_window: 128000, quality_tier: medium }
+
+  cohere:
+    type: cohere
+    api_key_env: COHERE_API_KEY
+    region: global
+    models:
+      command-r-plus:    { in_per_1m: 2.50,  out_per_1m: 10.00, context_window: 128000, quality_tier: high }
+      command-r:         { in_per_1m: 0.15,  out_per_1m: 0.60,  context_window: 128000, quality_tier: medium }
+
+  mistral:
+    type: mistral
+    api_key_env: MISTRAL_API_KEY
+    endpoint_env: MISTRAL_BASE_URL
+    region: eu-west-1
+    compliance: [gdpr]
+    models:
+      mistral-large-latest:  { in_per_1m: 2.00, out_per_1m: 6.00, context_window: 128000, quality_tier: high }
+      mistral-small-latest:  { in_per_1m: 0.20, out_per_1m: 0.60, context_window: 128000, quality_tier: medium }
+
+  groq:
+    type: groq
+    api_key_env: GROQ_API_KEY
+    region: global
+    models:
+      llama-3.3-70b-versatile: { in_per_1m: 0.59, out_per_1m: 0.79, context_window: 128000, quality_tier: medium, latency_tier: ultra_fast }
+      llama-3.1-8b-instant:    { in_per_1m: 0.05, out_per_1m: 0.08, context_window: 128000, quality_tier: low,    latency_tier: ultra_fast }
+
+  together_ai:
+    type: together_ai
+    api_key_env: TOGETHER_API_KEY
+    region: global
+    models:
+      meta-llama/Llama-3.3-70B-Instruct-Turbo: { in_per_1m: 0.88, out_per_1m: 0.88, context_window: 128000, quality_tier: medium }
+      Qwen/Qwen2.5-72B-Instruct-Turbo:         { in_per_1m: 1.20, out_per_1m: 1.20, context_window: 32000,  quality_tier: medium }
+
+  huggingface:
+    type: huggingface_tgi
+    api_key_env: HUGGINGFACE_API_TOKEN
+    endpoint_env: HF_INFERENCE_ENDPOINT_URL
+    region: configurable
+    models:
+      meta-llama/Meta-Llama-3.1-70B-Instruct: { in_per_1m: 0.90, out_per_1m: 0.90, context_window: 128000, quality_tier: medium }
+
+  ollama:
+    type: ollama
+    endpoint_env: OLLAMA_BASE_URL            # default http://localhost:11434
+    region: on_prem
+    compliance: [air_gapped, on_prem_only]
+    models:
+      llama3.1:8b:   { in_per_1m: 0, out_per_1m: 0, context_window: 128000, quality_tier: medium, latency_tier: local }
+      llama3.1:70b:  { in_per_1m: 0, out_per_1m: 0, context_window: 128000, quality_tier: high,   latency_tier: local }
+      qwen2.5:32b:   { in_per_1m: 0, out_per_1m: 0, context_window: 32000,  quality_tier: medium, latency_tier: local }
+
+  custom:
+    type: openai_compatible
+    api_key_env: CUSTOM_LLM_API_KEY
+    endpoint_env: CUSTOM_LLM_ENDPOINT
+    region: on_prem
+    compliance: [air_gapped, on_prem_only, custom_contractual]
+    models:
+      enterprise-llama-70b-instruct: { in_per_1m: 0, out_per_1m: 0, context_window: 128000, quality_tier: high, latency_tier: local }
+
+# ----------------------------------------------------------------------------
+# Per-agent overrides — route specific agents to specific profiles/models.
+# Architecture/Security/Incident agents need maximum reasoning; Documentation/
+# Cost agents can run on cheaper, faster models.
+# ----------------------------------------------------------------------------
+agent_overrides:
+  supervisor_agent:          { profile: production-default }
+  architecture_agent:        { profile: high-reasoning }
+  security_agent:            { profile: high-reasoning }
+  incident_response_agent:   { profile: high-reasoning, routing_strategy: latency }
+  kubernetes_agent:          { profile: production-default }
+  cost_optimization_agent:   { profile: production-default, routing_strategy: cost }
+  documentation_agent:       { profile: production-default, routing_strategy: cost }
+  cicd_agent:                { profile: production-default }
+  performance_agent:         { profile: high-reasoning }

@@ -9,3 +9,31 @@ pydantic>=2.5.0
 httpx>=0.27.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
+pyyaml>=6.0.1
+
+# ---------------------------------------------------------------------------
+# Universal LLM Provider Abstraction Layer (agentic-ai/llm/)
+# Install only the providers your deployment actually uses — imports in
+# provider_factory.py are lazy, so an uninstalled SDK only errors if that
+# specific provider is selected in llm-config.yaml. The base set above
+# (langchain-openai/openai) covers `openai`, `azure_openai`, and `custom`
+# (OpenAI-compatible gateways). Add the rest as needed:
+# ---------------------------------------------------------------------------
+langchain-anthropic>=0.3.0       # anthropic (Claude)
+langchain-google-genai>=2.0.0    # gemini
+langchain-google-vertexai>=2.0.0 # vertex_ai
+langchain-aws>=0.2.0             # bedrock
+langchain-cohere>=0.3.0          # cohere
+langchain-mistralai>=0.2.0       # mistral
+langchain-groq>=0.2.0            # groq
+langchain-together>=0.2.0        # together_ai
+langchain-huggingface>=0.1.0     # huggingface
+langchain-ollama>=0.2.0          # ollama / local & open-source models
+
+# AutoGen multi-agent workflows (agentic-ai/autogen/)
+pyautogen>=0.3.0
+
+# MCP server + RAG pipeline
+mcp>=1.0.0
+qdrant-client>=1.11.0
+rank-bm25>=0.2.2

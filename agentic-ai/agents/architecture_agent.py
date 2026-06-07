@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_openai import AzureChatOpenAI
+from agentic_ai.llm import get_chat_model
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -292,13 +292,7 @@ Always generate a Mermaid diagram as part of any architecture analysis.
 
 
 def call_model(state: ArchitectureState) -> dict:
-    llm = AzureChatOpenAI(
-        azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        api_version="2025-01-01-preview",
-        temperature=0,
-    )
+    llm = get_chat_model(agent_name="architecture_agent", temperature=0)
     tools = [analyze_service_dependencies, generate_architecture_diagram,
              assess_technical_debt, generate_adr, recommend_modernization_path]
     response = llm.bind_tools(tools).invoke([SystemMessage(content=SYSTEM_PROMPT)] + state["messages"])

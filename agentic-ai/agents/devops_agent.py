@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_openai import AzureChatOpenAI
+from agentic_ai.llm import get_chat_model
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -165,14 +165,11 @@ def post_slack_notification(
 
 # ─── LLM Configuration ────────────────────────────────────────────────
 def create_llm():
-    return AzureChatOpenAI(
-        azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        api_version="2025-01-01-preview",
-        temperature=0,
-        streaming=True,
-    )
+    """Provider-agnostic chat model — selection driven entirely by
+    agentic-ai/config/llm-config.yaml (agent_overrides.cicd_agent).
+    Works identically across OpenAI, Azure OpenAI, Anthropic, Gemini,
+    Bedrock, Groq, Ollama, etc. See agentic-ai/llm/README.md."""
+    return get_chat_model(agent_name="cicd_agent", temperature=0, streaming=True)
 
 
 # ─── System Prompt ────────────────────────────────────────────────────
